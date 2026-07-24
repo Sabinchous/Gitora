@@ -1,0 +1,27 @@
+{
+  "appId": "com.gitora.app",
+  "productName": "Gitora",
+  "artifactName": "${productName} ${version}.${ext}",
+  "directories": {
+    "output": "outputs/release"
+  },
+  "files": [
+    "dist/**/*",
+    "electron/**/*"
+  ],
+  "win": {
+    "target": "nsis",
+    "icon": "build/icon.png"
+  },
+  "mac": {
+    "target": "dmg"
+  },
+  "linux": {
+    "target": "AppImage",
+    "icon": "build/icon.png"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true
+  }
+}
