@@ -214,6 +214,9 @@ gitora/
 ```
 Разработано совместно Sabinchous и Appappars
 
+
+Видео для ознакомления с Gitora - https://youtu.be/cvgKoUQMLSU?si=B5XQ5HT9ino9PjUq
+
 ## Версия
 
 Current version: **0.1.12**
