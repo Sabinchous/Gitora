@@ -2,6 +2,8 @@ import React, { useEffect, useState } from 'react';
 import { FolderOpen, Palette, RefreshCw, Settings, X } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { applyThemePreference, ThemePreference } from '../../lib/theme';
+import { SelectMenu } from '../common/SelectMenu';
+import { AiConnectionPanel } from '../AI/AiConnectionPanel';
 
 interface Settings {
   theme: ThemePreference;
@@ -18,8 +20,9 @@ const DEFAULT_SETTINGS: Settings = {
 };
 
 export const SettingsModal: React.FC = () => {
-  const { setSettingsOpen, loading, notify, project, connected, lastUpdatedAt, refreshRepositoryData, syncAllData } = useApp();
+  const { setSettingsOpen, loading, notify, project, connected, lastUpdatedAt, currentVersion, refreshRepositoryData, syncAllData } = useApp();
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
+  const [section, setSection] = useState<'general' | 'integrations'>('general');
   const [closing, setClosing] = useState(false);
   const [syncing, setSyncing] = useState(false);
 
@@ -75,7 +78,7 @@ export const SettingsModal: React.FC = () => {
 
   const syncRepository = async () => {
     if (!connected || syncing) {
-      notify('Сначала подключите GitHub');
+      notify('Сначала подключитесь с PAT');
       return;
     }
     setSyncing(true);
@@ -94,7 +97,7 @@ export const SettingsModal: React.FC = () => {
       onMouseDown={(event) => event.target === event.currentTarget && close()}
     >
       <div
-        className="modal-panel w-[min(440px,100%)] max-h-[calc(100vh-24px)] overflow-auto rounded-2xl p-6 sm:p-7 relative"
+        className="modal-panel w-[min(560px,100%)] max-h-[calc(100vh-24px)] overflow-auto rounded-2xl p-6 sm:p-7 relative"
         role="dialog"
         aria-modal="true"
         aria-labelledby="settings-title"
@@ -106,16 +109,22 @@ export const SettingsModal: React.FC = () => {
           <Settings size={25} />
         </div>
         <h2 id="settings-title" className="text-[23px] font-semibold mt-4 mb-1">Настройки</h2>
-        <p className="text-[11px] text-[#7D7482] leading-relaxed mb-5">
+        <p className="text-xs text-[#7D7482] leading-relaxed mb-5">
           Настройте внешний вид и поведение приложения
         </p>
 
-        <div className="space-y-6">
+        <div className="mb-5 flex gap-1 rounded-lg bg-[var(--surface-soft)] p-1" role="tablist" aria-label="Разделы настроек">
+          <button type="button" role="tab" aria-selected={section === 'general'} className={`min-h-10 flex-1 rounded-md px-3 text-xs font-semibold transition-colors ${section === 'general' ? 'bg-[var(--surface)] text-[var(--ink)] shadow-sm' : 'text-[var(--muted)] hover:text-[var(--ink)]'}`} onClick={() => setSection('general')}>Основные</button>
+          <button type="button" role="tab" aria-selected={section === 'integrations'} className={`min-h-10 flex-1 rounded-md px-3 text-xs font-semibold transition-colors ${section === 'integrations' ? 'bg-[var(--surface)] text-[var(--ink)] shadow-sm' : 'text-[var(--muted)] hover:text-[var(--ink)]'}`} onClick={() => setSection('integrations')}>Интеграции</button>
+        </div>
+
+        <div data-settings-section={section}>
+        {section === 'integrations' ? <AiConnectionPanel /> : <div className="space-y-6">
           <div className="border border-[rgba(38,23,50,.12)] rounded-xl p-3 bg-[#F3EFE9]">
             <div className="flex items-start justify-between gap-3">
               <div>
                 <h3 className="text-xs font-bold">Синхронизация с GitHub</h3>
-                <p className="text-[10px] text-[#7D7482] mt-1">
+                <p className="text-xs text-[#7D7482] mt-1">
                   Обновить список репозиториев, ветки, коммиты и граф текущего репозитория.
                 </p>
               </div>
@@ -123,7 +132,7 @@ export const SettingsModal: React.FC = () => {
             </div>
             <button
               type="button"
-              className="mt-3 h-9 px-3 bg-[#261732] text-[#E7E0D6] rounded-lg text-[11px] font-semibold flex items-center gap-2 disabled:opacity-40"
+              className="mt-3 h-9 px-3 bg-[#261732] text-[#E7E0D6] rounded-lg text-xs font-semibold flex items-center gap-2 disabled:opacity-40"
               onClick={() => void syncRepository()}
               disabled={!connected || loading || syncing}
               aria-label={syncing ? 'Синхронизация с GitHub' : 'Синхронизировать с GitHub'}
@@ -131,10 +140,10 @@ export const SettingsModal: React.FC = () => {
               <RefreshCw size={14} className={syncing ? 'animate-spin' : ''} />
               {syncing ? 'Синхронизация…' : 'Синхронизировать сейчас'}
             </button>
-            <p className="text-[10px] text-[#7D7482] mt-2" aria-live="polite">
+            <p className="text-xs text-[#7D7482] mt-2" aria-live="polite">
               {lastUpdatedAt
                 ? `Последнее обновление: ${new Date(lastUpdatedAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })}`
-                : connected ? 'Синхронизация ещё не выполнялась' : 'Подключите GitHub, чтобы синхронизировать данные'}
+                : connected ? 'Синхронизация ещё не выполнялась' : 'Подключитесь с PAT, чтобы синхронизировать данные'}
             </p>
           </div>
 
@@ -144,7 +153,7 @@ export const SettingsModal: React.FC = () => {
               {(['light', 'dark', 'system'] as const).map((theme) => (
                 <button
                   key={theme}
-                  className={`h-[40px] border rounded-lg text-xs flex items-center justify-center gap-1.5 ${settings.theme === theme ? 'bg-[#E7E0D6] border-[#AEA989]' : 'border-[rgba(38,23,50,.12)]'}`}
+                  className={`h-[40px] border rounded-lg text-xs flex items-center justify-center gap-1.5 ${settings.theme === theme ? 'bg-[var(--selection-bg)] text-[var(--selection-ink)] border-[#AEA989]' : 'border-[rgba(38,23,50,.12)]'}`}
                   onClick={() => {
                     const nextSettings = { ...settings, theme };
                     setSettings(nextSettings);
@@ -163,15 +172,13 @@ export const SettingsModal: React.FC = () => {
               Лимит коммитов
               <span className="text-[#7D7482] font-normal ml-1">(для загрузки)</span>
             </label>
-            <select
-              value={settings.commitLimit}
-              onChange={(event) => setSettings({ ...settings, commitLimit: Number(event.target.value) })}
-              className="focus-surface w-full h-[42px] border border-[rgba(38,23,50,.12)] bg-[#F3EFE9] rounded-lg px-3 text-sm"
-            >
-              <option value={25}>25 коммитов</option>
-              <option value={50}>50 коммитов</option>
-              <option value={100}>100 коммитов</option>
-            </select>
+            <SelectMenu
+              value={String(settings.commitLimit)}
+              onChange={value => setSettings({ ...settings, commitLimit: Number(value) })}
+              options={[{ value: '25', label: '25 коммитов' }, { value: '50', label: '50 коммитов' }, { value: '100', label: '100 коммитов' }]}
+              ariaLabel="Лимит коммитов"
+              className="h-[42px] text-sm"
+            />
           </div>
 
           <div>
@@ -179,29 +186,29 @@ export const SettingsModal: React.FC = () => {
             <div className="grid gap-2">
               <button
                 type="button"
-                className={`min-h-[42px] border rounded-lg px-3 text-sm text-left flex items-center justify-between gap-3 ${settings.downloadMode === 'downloads' ? 'bg-[#E7E0D6] border-[#AEA989]' : 'border-[rgba(38,23,50,.12)]'}`}
+                className={`min-h-[42px] border rounded-lg px-3 text-sm text-left flex items-center justify-between gap-3 ${settings.downloadMode === 'downloads' ? 'bg-[var(--selection-bg)] text-[var(--selection-ink)] border-[#AEA989]' : 'border-[rgba(38,23,50,.12)]'}`}
                 onClick={() => setSettings({ ...settings, downloadMode: 'downloads' })}
               >
                 <span>
                   <b className="block text-xs">Системная папка загрузок</b>
-                  <small className="block text-[10px] text-[#7D7482] mt-0.5">Файлы сохраняются в Downloads</small>
+                  <small className="block text-xs text-[#7D7482] mt-0.5">Файлы сохраняются в Downloads</small>
                 </span>
               </button>
               <button
                 type="button"
-                className={`min-h-[42px] border rounded-lg px-3 text-sm text-left flex items-center justify-between gap-3 ${settings.downloadMode === 'ask' ? 'bg-[#E7E0D6] border-[#AEA989]' : 'border-[rgba(38,23,50,.12)]'}`}
+                className={`min-h-[42px] border rounded-lg px-3 text-sm text-left flex items-center justify-between gap-3 ${settings.downloadMode === 'ask' ? 'bg-[var(--selection-bg)] text-[var(--selection-ink)] border-[#AEA989]' : 'border-[rgba(38,23,50,.12)]'}`}
                 onClick={() => setSettings({ ...settings, downloadMode: 'ask' })}
               >
                 <span>
                   <b className="block text-xs">Спрашивать каждый раз</b>
-                  <small className="block text-[10px] text-[#7D7482] mt-0.5">Перед скачиванием откроется окно сохранения</small>
+                  <small className="block text-xs text-[#7D7482] mt-0.5">Перед скачиванием откроется окно сохранения</small>
                 </span>
               </button>
-              <div className={`border rounded-lg p-3 ${settings.downloadMode === 'defaultFolder' ? 'bg-[#E7E0D6] border-[#AEA989]' : 'border-[rgba(38,23,50,.12)]'}`}>
+              <div className={`border rounded-lg p-3 ${settings.downloadMode === 'defaultFolder' ? 'bg-[var(--selection-bg)] text-[var(--selection-ink)] border-[#AEA989]' : 'border-[rgba(38,23,50,.12)]'}`}>
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    className="h-9 px-3 bg-[#261732] text-[#E7E0D6] rounded-lg text-[11px] font-semibold flex items-center gap-2"
+                    className="h-9 px-3 bg-[#261732] text-[#E7E0D6] rounded-lg text-xs font-semibold flex items-center gap-2"
                     onClick={() => void selectDownloadFolder()}
                   >
                     <FolderOpen size={15} />
@@ -209,14 +216,14 @@ export const SettingsModal: React.FC = () => {
                   </button>
                   <button
                     type="button"
-                    className="h-9 px-3 border border-[rgba(38,23,50,.12)] rounded-lg text-[11px] font-semibold"
+                    className="h-9 px-3 border border-[rgba(38,23,50,.12)] rounded-lg text-xs font-semibold"
                     onClick={() => setSettings({ ...settings, downloadMode: 'defaultFolder' })}
                     disabled={!settings.downloadDirectory}
                   >
                     Использовать
                   </button>
                 </div>
-                <p className="mt-2 text-[10px] text-[#7D7482] break-all">
+                <p className="mt-2 text-xs text-[#7D7482] break-all">
                   {settings.downloadDirectory || 'Папка по умолчанию не выбрана'}
                 </p>
               </div>
@@ -225,15 +232,16 @@ export const SettingsModal: React.FC = () => {
 
           <div className="pt-4 border-t border-[rgba(38,23,50,.08)]">
             <h3 className="text-xs font-bold mb-2">О приложении</h3>
-            <div className="text-[11px] text-[#7D7482] space-y-1">
+            <div className="text-xs text-[#7D7482] space-y-1">
               <p>Gitora — визуальный граф истории Git</p>
-              <p>Версия: 0.1.12</p>
+              <p>Версия: {currentVersion}</p>
               <p>Разработано совместно Sabinchous и Appappars</p>
             </div>
           </div>
+        </div>}
         </div>
 
-        <div className="flex flex-col-reverse sm:flex-row justify-end gap-2 mt-6">
+        {section === 'general' && <div className="flex flex-col-reverse sm:flex-row justify-end gap-2 mt-6">
           <button type="button" className="px-4 py-2 border border-[rgba(38,23,50,.12)] rounded-lg text-sm font-semibold" onClick={close}>
             Отмена
           </button>
@@ -245,7 +253,7 @@ export const SettingsModal: React.FC = () => {
             <Palette size={16} />
             Сохранить
           </button>
-        </div>
+        </div>}
       </div>
     </div>
   );

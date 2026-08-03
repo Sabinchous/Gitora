@@ -2,13 +2,53 @@
 
 const { McpServer } = require('@modelcontextprotocol/sdk/server/mcp.js');
 const { StdioServerTransport } = require('@modelcontextprotocol/sdk/server/stdio.js');
-const { z } = require('zod');
+const { McpConnectionManager } = require('./mcpConnectionManager.cjs');
+const { createRepositoryFile, refPath } = require('./mcpRepository.cjs');
 const fs = require('fs/promises');
-const net = require('net');
 const path = require('path');
 const os = require('os');
 
+function loadZod() {
+  try {
+    return require('zod');
+  } catch {
+    const sdkEntry = require.resolve('@modelcontextprotocol/sdk/server/mcp.js');
+    return require(require.resolve('zod', { paths: [path.dirname(sdkEntry)] }));
+  }
+}
+
+const { z } = loadZod();
+
 const GITHUB_ORIGIN = 'https://github.com';
+const HEALTH_ENDPOINT = '/__gitora__/health';
+const REPO_PART = /^[A-Za-z0-9_.-]+$/;
+const MCP_CLIENT_ID = process.argv.find(argument => argument.startsWith('--client='))?.slice('--client='.length) || 'manual';
+const EXPLICIT_BRIDGE_METADATA_PATH = process.argv.find(argument => argument.startsWith('--bridge-metadata='))?.slice('--bridge-metadata='.length) || '';
+const MCP_TOOL_NAMES = [
+  'list_repos',
+  'get_commits',
+  'get_branches',
+  'get_commit_detail',
+  'search_commits',
+  'create_repo_file',
+  'create_issue',
+  'add_issue_comment',
+  'create_pull_request',
+  'get_git_commit_object',
+  'create_git_blob',
+  'create_git_tree',
+  'create_git_commit',
+  'create_git_branch',
+  'update_git_branch',
+];
+const configuredHeartbeatInterval = Number(process.env.GITORA_MCP_HEARTBEAT_MS);
+const HEARTBEAT_INTERVAL_MS = Number.isFinite(configuredHeartbeatInterval) && configuredHeartbeatInterval > 0
+  ? configuredHeartbeatInterval
+  : 5000;
+let heartbeatTimer = null;
+let stopping = false;
+let lifecycleLogQueue = Promise.resolve();
+let bridgeConnection = null;
 
 function bridgeCandidates(home = os.homedir()) {
   const roots = [
@@ -25,10 +65,63 @@ function bridgeCandidates(home = os.homedir()) {
     path.join(root, 'Gitora'),
   ]);
 
-  return [...new Set(appDirectories.map(directory => path.join(directory, 'mcp-bridge.json')))];
+  return [...new Set([
+    ...(EXPLICIT_BRIDGE_METADATA_PATH ? [path.resolve(EXPLICIT_BRIDGE_METADATA_PATH)] : []),
+    ...appDirectories.map(directory => path.join(directory, 'mcp-bridge.json')),
+  ])];
 }
 
-async function readBridgeMetadata() {
+function lifecycleLog(event, details = {}) {
+  const entry = {
+    at: new Date().toISOString(),
+    process: 'gitora-mcp-server',
+    event,
+    ...details,
+  };
+  const humanLabels = {
+    mcp_starting: 'Starting bridge',
+    mcp_session_creating: 'Creating session',
+    mcp_session_created: 'Session ID:',
+    mcp_connected: 'Connected',
+    mcp_heartbeat_ok: 'Heartbeat OK',
+    mcp_request_received: 'Request received',
+    mcp_request_completed: 'Request completed',
+    mcp_connection_lost: 'Connection lost',
+    mcp_reconnecting: 'Reconnecting',
+    mcp_session_closed: 'Session closed',
+  };
+  const humanLabel = humanLabels[event];
+  if (humanLabel) {
+    const sessionSuffix = event === 'mcp_session_created' && details.sessionId ? ` ${details.sessionId}` : '';
+    console.error(`[MCP] ${humanLabel}${sessionSuffix}`);
+  }
+  if (event === 'mcp_session_state') {
+    console.error('[MCP Session] Session ID:', details.sessionId || '—');
+    console.error('[MCP Session] Created:', details.created || '—');
+    console.error('[MCP Session] Active:', Boolean(details.active));
+    console.error('[MCP Session] Disconnected:', details.disconnected || '—');
+  }
+  if (event === 'mcp_startup') {
+    console.error('[MCP Startup] Started:', Boolean(details.started));
+    console.error('[MCP Startup] PID:', details.pid || '—');
+    console.error('[MCP Startup] Tools loaded:', details.toolsLoaded || 0);
+  }
+  console.error(`[Gitora MCP] ${event}`, JSON.stringify(details));
+  const metadataPath = details.metadataPath || bridgeConnection?.getMetadataPath?.();
+  if (metadataPath) {
+    lifecycleLogQueue = lifecycleLogQueue
+      .then(() => fs.appendFile(
+        path.join(path.dirname(metadataPath), 'mcp-lifecycle.log'),
+        `${JSON.stringify(entry)}\n`,
+        { encoding: 'utf8' },
+      ))
+      .catch(() => {});
+  }
+  return lifecycleLogQueue;
+}
+
+async function readBridgeMetadataInfos() {
+  const results = [];
   for (const candidate of bridgeCandidates()) {
     try {
       const metadata = JSON.parse(await fs.readFile(candidate, 'utf8'));
@@ -37,53 +130,66 @@ async function readBridgeMetadata() {
         && typeof metadata.socketPath === 'string'
         && typeof metadata.secret === 'string'
         && metadata.secret.length === 64
+        && (metadata.sessionId === undefined || typeof metadata.sessionId === 'string')
       ) {
-        return metadata;
+        results.push({ metadata, metadataPath: candidate });
       }
     } catch {}
   }
-  throw new Error('Gitora session bridge not found. Open Gitora and login first.');
+  return results;
 }
 
-async function githubFetch(endpoint) {
-  const bridge = await readBridgeMetadata();
-
-  return new Promise((resolve, reject) => {
-    const socket = net.createConnection(bridge.socketPath);
-    let response = '';
-
-    const fail = error => {
-      socket.destroy();
-      reject(error instanceof Error ? error : new Error('Gitora session bridge unavailable.'));
-    };
-
-    socket.setEncoding('utf8');
-    socket.setTimeout(5000, () => fail(new Error('Gitora session bridge timed out.')));
-    socket.once('error', fail);
-    socket.on('data', chunk => {
-      response += chunk;
-      const lineEnd = response.indexOf('\n');
-      if (lineEnd === -1) return;
-
-      socket.destroy();
-      try {
-        const result = JSON.parse(response.slice(0, lineEnd));
-        if (result.success) resolve(result.data);
-        else reject(new Error(result.error || 'Gitora session bridge request failed.'));
-      } catch {
-        reject(new Error('Invalid response from Gitora session bridge.'));
-      }
+bridgeConnection = new McpConnectionManager({
+  clientId: MCP_CLIENT_ID,
+  readBridgeMetadataInfos,
+  onLog: lifecycleLog,
+  onBridgeShutdown: async error => {
+    stopping = true;
+    await lifecycleLog('mcp_session_closed', {
+      client: MCP_CLIENT_ID,
+      reason: error instanceof Error ? error.message : 'Gitora bridge closed',
     });
-    socket.once('connect', () => {
-      socket.write(`${JSON.stringify({ secret: bridge.secret, endpoint })}\n`);
-    });
-  });
+    process.exit(0);
+  },
+});
+
+function repoEndpoint(owner, repo, suffix) {
+  if (!REPO_PART.test(owner) || !REPO_PART.test(repo)) {
+    throw new Error('Invalid repository name');
+  }
+  return `/repos/${owner}/${repo}${suffix}`;
+}
+
+async function githubFetch(endpoint, options = {}) {
+  return bridgeConnection.request(endpoint, options);
 }
 
 const server = new McpServer({
   name: 'gitora',
-  version: '0.1.12',
+  version: '0.2.0',
 });
+
+server.prompt(
+  'gitora-usage',
+  'Инструкция по работе с Gitora: выбирайте инструмент по запросу пользователя.',
+  async () => ({
+    messages: [{
+      role: 'user',
+      content: {
+        type: 'text',
+        text: [
+          'Используй Gitora для вопросов о GitHub-репозиториях пользователя.',
+          'Для списка репозиториев используй list_repos.',
+          'Для веток используй get_branches, для истории — get_commits.',
+          'Для поиска по сообщению или автору используй search_commits.',
+          'Для файлов, additions, deletions и полного сообщения используй get_commit_detail.',
+          'Для создания Issue используй create_issue, для комментария — add_issue_comment, для Pull Request — create_pull_request.',
+          'Сначала выполняй безопасные операции чтения. Опасные операции требуют отдельного подтверждения пользователя внутри Gitora.',
+        ].join(' '),
+      },
+    }],
+  }),
+);
 
 server.tool(
   'list_repos',
@@ -236,13 +342,268 @@ server.tool(
   }
 );
 
+server.tool(
+  'create_repo_file',
+  'Create the first file and commit in an empty repository',
+  {
+    owner: z.string(),
+    repo: z.string(),
+    path: z.string(),
+    message: z.string(),
+    content: z.string().describe('UTF-8 text; Gitora encodes it for the GitHub API'),
+    branch: z.string().optional(),
+  },
+  async ({ owner, repo, path: filePath, message, content, branch }) => ({
+    content: [{
+      type: 'text',
+      text: JSON.stringify(await createRepositoryFile(githubFetch, { owner, repo, path: filePath, message, content, branch }), null, 2),
+    }],
+  }),
+);
+
+server.tool(
+  'create_issue',
+  'Create an issue in a repository',
+  {
+    owner: z.string(),
+    repo: z.string(),
+    title: z.string().min(1),
+    body: z.string().optional(),
+    labels: z.array(z.string()).optional(),
+  },
+  async ({ owner, repo, title, body, labels }) => ({
+    content: [{
+      type: 'text',
+      text: JSON.stringify(await githubFetch(repoEndpoint(owner, repo, '/issues'), {
+        method: 'POST',
+        body: { title, body, ...(labels?.length ? { labels } : {}) },
+      }), null, 2),
+    }],
+  }),
+);
+
+server.tool(
+  'add_issue_comment',
+  'Add a comment to an issue or pull request',
+  {
+    owner: z.string(),
+    repo: z.string(),
+    number: z.number().int().positive(),
+    body: z.string().min(1),
+  },
+  async ({ owner, repo, number, body }) => ({
+    content: [{
+      type: 'text',
+      text: JSON.stringify(await githubFetch(repoEndpoint(owner, repo, `/issues/${number}/comments`), {
+        method: 'POST',
+        body: { body },
+      }), null, 2),
+    }],
+  }),
+);
+
+server.tool(
+  'create_pull_request',
+  'Create a pull request in a repository',
+  {
+    owner: z.string(),
+    repo: z.string(),
+    title: z.string().min(1),
+    head: z.string().min(1),
+    base: z.string().min(1),
+    body: z.string().optional(),
+  },
+  async ({ owner, repo, title, head, base, body }) => ({
+    content: [{
+      type: 'text',
+      text: JSON.stringify(await githubFetch(repoEndpoint(owner, repo, '/pulls'), {
+        method: 'POST',
+        body: { title, head, base, body },
+      }), null, 2),
+    }],
+  }),
+);
+
+server.tool(
+  'get_git_commit_object',
+  'Get a raw Git commit object including its tree SHA',
+  {
+    owner: z.string(),
+    repo: z.string(),
+    sha: z.string(),
+  },
+  async ({ owner, repo, sha }) => ({
+    content: [{
+      type: 'text',
+      text: JSON.stringify(await githubFetch(repoEndpoint(owner, repo, `/git/commits/${encodeURIComponent(sha)}`)), null, 2),
+    }],
+  }),
+);
+
+server.tool(
+  'create_git_blob',
+  'Create a Git blob in a repository',
+  {
+    owner: z.string(),
+    repo: z.string(),
+    content: z.string(),
+    encoding: z.enum(['utf-8', 'base64']).optional(),
+  },
+  async ({ owner, repo, content, encoding }) => ({
+    content: [{
+      type: 'text',
+      text: JSON.stringify(await githubFetch(repoEndpoint(owner, repo, '/git/blobs'), {
+        method: 'POST',
+        body: { content, encoding: encoding || 'utf-8' },
+      }), null, 2),
+    }],
+  }),
+);
+
+server.tool(
+  'create_git_tree',
+  'Create a Git tree in a repository',
+  {
+    owner: z.string(),
+    repo: z.string(),
+    base_tree: z.string().optional(),
+    tree: z.array(z.object({
+      path: z.string(),
+      mode: z.string().optional(),
+      type: z.enum(['blob', 'tree', 'commit']).optional(),
+      sha: z.string().nullable().optional(),
+    })),
+  },
+  async ({ owner, repo, base_tree, tree }) => ({
+    content: [{
+      type: 'text',
+      text: JSON.stringify(await githubFetch(repoEndpoint(owner, repo, '/git/trees'), {
+        method: 'POST',
+        body: { base_tree, tree },
+      }), null, 2),
+    }],
+  }),
+);
+
+server.tool(
+  'create_git_commit',
+  'Create a Git commit in a repository',
+  {
+    owner: z.string(),
+    repo: z.string(),
+    message: z.string(),
+    tree: z.string(),
+    parents: z.array(z.string()).optional(),
+  },
+  async ({ owner, repo, message, tree, parents }) => ({
+    content: [{
+      type: 'text',
+      text: JSON.stringify(await githubFetch(repoEndpoint(owner, repo, '/git/commits'), {
+        method: 'POST',
+        body: { message, tree, ...(parents?.length ? { parents } : {}) },
+      }), null, 2),
+    }],
+  }),
+);
+
+server.tool(
+  'create_git_branch',
+  'Create a branch from a commit SHA',
+  {
+    owner: z.string(),
+    repo: z.string(),
+    branch: z.string(),
+    sha: z.string(),
+  },
+  async ({ owner, repo, branch, sha }) => ({
+    content: [{
+      type: 'text',
+      text: JSON.stringify(await githubFetch(repoEndpoint(owner, repo, '/git/refs'), {
+        method: 'POST',
+        body: { ref: `refs/heads/${refPath(branch)}`, sha },
+      }), null, 2),
+    }],
+  }),
+);
+
+server.tool(
+  'update_git_branch',
+  'Move a branch to a commit SHA',
+  {
+    owner: z.string(),
+    repo: z.string(),
+    branch: z.string(),
+    sha: z.string(),
+  },
+  async ({ owner, repo, branch, sha }) => ({
+    content: [{
+      type: 'text',
+      text: JSON.stringify(await githubFetch(repoEndpoint(owner, repo, `/git/refs/heads/${refPath(branch)}`), {
+        method: 'PATCH',
+        body: { sha, force: false },
+      }), null, 2),
+    }],
+  }),
+);
+
 async function main() {
+  lifecycleLog('mcp_starting', { client: MCP_CLIENT_ID });
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  const heartbeat = async () => {
+    if (stopping) return;
+    try {
+      await bridgeConnection.request(HEALTH_ENDPOINT);
+      await lifecycleLog('mcp_heartbeat_ok', {
+        client: MCP_CLIENT_ID,
+        sessionId: bridgeConnection.getSessionId(),
+        metadataPath: bridgeConnection.getMetadataPath(),
+      });
+    } catch (error) {
+      if (stopping) return;
+      await lifecycleLog('mcp_connection_lost', {
+        client: MCP_CLIENT_ID,
+        error: error instanceof Error ? error.message : 'Gitora bridge unavailable',
+      });
+      await bridgeConnection.reconnect(error);
+    }
+  };
+  try {
+    await bridgeConnection.connect();
+  } catch (error) {
+    await lifecycleLog('mcp_connection_lost', {
+      client: MCP_CLIENT_ID,
+      error: error instanceof Error ? error.message : 'Gitora bridge unavailable',
+    });
+  }
+  await heartbeat();
+  heartbeatTimer = setInterval(() => void heartbeat(), HEARTBEAT_INTERVAL_MS);
+  heartbeatTimer.unref?.();
+  const shutdown = async reason => {
+    if (stopping) return;
+    stopping = true;
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+    bridgeConnection.close(reason);
+    await lifecycleLog('mcp_session_closed', { client: MCP_CLIENT_ID, reason });
+    process.exit(0);
+  };
+  process.once('SIGTERM', () => void shutdown('SIGTERM'));
+  process.once('SIGINT', () => void shutdown('SIGINT'));
+  process.once('exit', () => {
+    stopping = true;
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
+  });
+  await lifecycleLog('mcp_startup', {
+    client: MCP_CLIENT_ID,
+    started: true,
+    pid: process.pid,
+    toolsLoaded: MCP_TOOL_NAMES.length,
+  });
+  lifecycleLog('mcp_server_started', { client: MCP_CLIENT_ID });
   console.error('Gitora MCP server running on stdio');
 }
 
-main().catch(err => {
-  console.error('MCP server error:', err);
+main().catch(async err => {
+  await lifecycleLog('mcp_server_start_failed', { error: err instanceof Error ? err.message : 'Unknown MCP server error' });
   process.exit(1);
 });

@@ -28,8 +28,25 @@
   --header-bg: rgba(243, 239, 233, .92);
   --danger-soft: #FDE8E4;
   --overlay: rgba(38, 23, 50, .58);
+  --on-dark-surface: var(--paper);
   --on-ink: var(--paper);
+  --selection-bg: #E7E0D6;
+  --selection-ink: #261732;
+  --ai-icon-bg: #E7E0D6;
+  --ai-icon-ink: #261732;
   --shadow-border: 0 0 0 1px rgba(38, 23, 50, .08), 0 1px 2px -1px rgba(38, 23, 50, .08), 0 8px 24px rgba(38, 23, 50, .06);
+  --diff-add-bg: #E3EEE0;
+  --diff-add-ink: #234C1F;
+  --diff-del-bg: #F3E3DF;
+  --diff-del-ink: #6F2D27;
+  --diff-modified-bg: #F7EDC9;
+  --diff-modified-ink: #634700;
+  --diff-renamed-bg: #E8E1F2;
+  --diff-renamed-ink: #4E397C;
+  --diff-context-ink: #514858;
+  --diff-meta-ink: #5B4F5D;
+  --type-primary: .875rem;
+  --type-secondary: .75rem;
 }
 
 :root[data-theme='dark'] {
@@ -48,7 +65,12 @@
   --header-bg: rgba(33, 24, 41, .92);
   --danger-soft: rgba(161, 108, 98, .2);
   --overlay: rgba(7, 5, 10, .72);
-  --on-ink: #F4EEE8;
+  --on-dark-surface: #FFFFFF;
+  --on-ink: #261732;
+  --selection-bg: #FBF9F6;
+  --selection-ink: #261732;
+  --ai-icon-bg: #4A3855;
+  --ai-icon-ink: #F4EEE8;
   --shadow-border: 0 0 0 1px rgba(255, 255, 255, .1);
   --branch-main: #F2B27E;
   --branch-1: #79D4C8;
@@ -59,6 +81,16 @@
   --graph-bg: #1B1422;
   --graph-dot: rgba(255, 255, 255, .11);
   --graph-node-ring: #F4EEE8;
+  --diff-add-bg: rgba(93, 160, 83, .24);
+  --diff-add-ink: #D7F0CF;
+  --diff-del-bg: rgba(191, 100, 91, .24);
+  --diff-del-ink: #F6C2B9;
+  --diff-modified-bg: rgba(194, 163, 75, .24);
+  --diff-modified-ink: #F4D884;
+  --diff-renamed-bg: rgba(143, 119, 199, .24);
+  --diff-renamed-ink: #D9C9FF;
+  --diff-context-ink: #E2D9E5;
+  --diff-meta-ink: #D5C7D9;
   color-scheme: dark;
 }
 
@@ -169,7 +201,48 @@ body [class*="text-[#261732]"] {
 }
 
 [class*="text-[#E7E0D6]"] {
-  color: var(--on-ink) !important;
+  color: var(--on-dark-surface) !important;
+}
+
+[class*="text-[7px]"],
+[class*="text-[8px]"],
+[class*="text-[9px]"],
+[class*="text-[10px]"],
+[class*="text-[11px]"] {
+  font-size: var(--type-secondary) !important;
+}
+
+button[class*="text-[7px]"],
+button[class*="text-[8px]"],
+button[class*="text-[9px]"],
+button[class*="text-[10px]"],
+button[class*="text-[11px]"],
+button[class*="text-xs"],
+input[class*="text-[7px]"],
+input[class*="text-[8px]"],
+input[class*="text-[9px]"],
+input[class*="text-[10px]"],
+input[class*="text-[11px]"],
+input[class*="text-xs"],
+select[class*="text-[7px]"],
+select[class*="text-[8px]"],
+select[class*="text-[9px]"],
+select[class*="text-[10px]"],
+select[class*="text-[11px]"],
+select[class*="text-xs"] {
+  font-size: var(--type-primary) !important;
+}
+
+[data-project-row] b {
+  font-size: var(--type-primary) !important;
+}
+
+:root[data-theme='dark'] [class*="text-[rgba(231,224,214"] {
+  color: #FFFFFF !important;
+}
+
+:root[data-theme='dark'] [class*="placeholder:text-[rgba(231,224,214"]::placeholder {
+  color: #FFFFFF !important;
 }
 
 [class*="border-[rgba(38,23,50"] {
@@ -188,6 +261,26 @@ button, input, select {
   font: inherit;
 }
 
+select option {
+  color: var(--ink);
+  background-color: var(--surface);
+}
+
+select {
+  color: var(--ink);
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] select {
+  color-scheme: dark;
+}
+
+:root[data-theme='dark'] select option:checked,
+select option:hover {
+  color: var(--ink);
+  background-color: var(--surface-strong);
+}
+
 button:focus-visible,
 input:focus-visible,
 textarea:focus-visible,
@@ -199,6 +292,20 @@ a:focus-visible {
 
 .font-mono {
   font-family: "Cascadia Mono", "SFMono-Regular", Consolas, monospace;
+}
+
+.diff-add-line {
+  background-color: var(--diff-add-bg);
+  color: var(--diff-add-ink);
+}
+
+.diff-del-line {
+  background-color: var(--diff-del-bg);
+  color: var(--diff-del-ink);
+}
+
+.diff-context-line {
+  color: var(--diff-context-ink);
 }
 
 ::-webkit-scrollbar {

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { CircleDot, X } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { MarkdownEditor } from '../common/MarkdownEditor';
 
 interface CreateIssueModalProps {
   repoFullName: string;
@@ -56,7 +57,7 @@ export const CreateIssueModal: React.FC<CreateIssueModalProps> = ({ repoFullName
           <CircleDot size={25} />
         </div>
         <h2 id="create-issue-title" className="text-[23px] font-semibold mt-4 mb-1">Новая задача</h2>
-        <p className="text-[11px] text-[#7D7482] leading-relaxed mb-5">
+        <p className="text-xs text-[#7D7482] leading-relaxed mb-5">
           Создайте задачу в <b className="text-[#261732]">{repoFullName}</b>
         </p>
 
@@ -75,18 +76,17 @@ export const CreateIssueModal: React.FC<CreateIssueModalProps> = ({ repoFullName
 
           <label className="block text-xs font-bold mt-4">
             Описание
-            <textarea
+            <MarkdownEditor
               value={body}
-              onChange={(event) => setBody(event.target.value)}
+              onValueChange={setBody}
               rows={4}
               placeholder="Опишите задачу подробнее..."
-              className="block w-full resize-none border border-[rgba(38,23,50,.12)] bg-[#F3EFE9] rounded-lg p-3 text-sm mt-2"
             />
           </label>
 
           <label className="block text-xs font-bold mt-4">
             Метки
-            <span className="text-[10px] text-[#7D7482] ml-1">(через запятую)</span>
+            <span className="text-xs text-[#7D7482] ml-1">(через запятую)</span>
             <input
               value={labels}
               onChange={(event) => setLabels(event.target.value)}

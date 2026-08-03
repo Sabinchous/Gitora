@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { PackagePlus, Paperclip, X } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { Branch, ReleaseAssetSelection } from '../../types';
+import { MarkdownEditor } from '../common/MarkdownEditor';
 
 interface CreateReleaseModalProps {
   branches: Branch[];
@@ -15,6 +16,14 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} МБ`;
 }
 
+type ReleaseStatus = 'none' | 'prerelease' | 'latest';
+
+const RELEASE_STATUS_OPTIONS: Array<{ value: ReleaseStatus; label: string; description: string }> = [
+  { value: 'none', label: 'Нет', description: 'Не помечать релиз как предрелиз или последнюю версию.' },
+  { value: 'prerelease', label: 'Предрелизная версия', description: 'Пометить релиз как не готовый к использованию в продакшене.' },
+  { value: 'latest', label: 'Последняя версия', description: 'Пометить релиз как последнюю версию для этого репозитория.' },
+];
+
 export const CreateReleaseModal: React.FC<CreateReleaseModalProps> = ({ branches, repoFullName, defaultBranch }) => {
   const { setReleaseOpen, createRelease, selectReleaseAsset, loading } = useApp();
   const [owner, repo] = repoFullName.split('/');
@@ -23,7 +32,7 @@ export const CreateReleaseModal: React.FC<CreateReleaseModalProps> = ({ branches
   const [body, setBody] = useState('');
   const [targetCommitish, setTargetCommitish] = useState(defaultBranch || branches[0]?.name || 'main');
   const [draft, setDraft] = useState(true);
-  const [prerelease, setPrerelease] = useState(false);
+  const [releaseStatus, setReleaseStatus] = useState<ReleaseStatus>('none');
   const [asset, setAsset] = useState<ReleaseAssetSelection | null>(null);
 
   useEffect(() => {
@@ -51,7 +60,8 @@ export const CreateReleaseModal: React.FC<CreateReleaseModalProps> = ({ branches
       name: name.trim(),
       body: body.trim(),
       draft,
-      prerelease,
+      prerelease: releaseStatus === 'prerelease',
+      makeLatest: releaseStatus === 'latest' ? 'true' : 'false',
       assetPath: asset?.path,
     });
     if (success) setReleaseOpen(false);
@@ -76,7 +86,7 @@ export const CreateReleaseModal: React.FC<CreateReleaseModalProps> = ({ branches
           <PackagePlus size={25} />
         </div>
         <h2 id="create-release-title" className="text-[23px] font-semibold mt-4 mb-1">Новый релиз</h2>
-        <p className="text-[11px] text-[#7D7482] leading-relaxed mb-5">
+        <p className="text-xs text-[#7D7482] leading-relaxed mb-5">
           Создайте GitHub Release в <b className="text-[#261732]">{repoFullName}</b>
         </p>
 
@@ -122,12 +132,11 @@ export const CreateReleaseModal: React.FC<CreateReleaseModalProps> = ({ branches
 
           <label className="block text-xs font-bold mt-4">
             Описание
-            <textarea
+            <MarkdownEditor
               value={body}
-              onChange={(event) => setBody(event.target.value)}
+              onValueChange={setBody}
               rows={5}
               placeholder="Что изменилось в этом релизе..."
-              className="block w-full resize-none border border-[rgba(38,23,50,.12)] bg-[#F3EFE9] rounded-lg p-3 text-sm mt-2"
             />
           </label>
 
@@ -142,16 +151,39 @@ export const CreateReleaseModal: React.FC<CreateReleaseModalProps> = ({ branches
             </button>
           </div>
 
-          <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-2">
-            <label className="min-h-[42px] border border-[rgba(38,23,50,.12)] rounded-lg px-3 flex items-center gap-2 text-xs font-bold">
-              <input type="checkbox" checked={draft} onChange={(event) => setDraft(event.target.checked)} />
+          <div className="mt-4">
+            <label className={`min-h-[42px] border border-[rgba(38,23,50,.12)] rounded-lg px-3 flex items-center gap-2 text-xs font-bold ${releaseStatus === 'latest' ? 'opacity-55' : ''}`}>
+              <input type="checkbox" checked={draft} disabled={releaseStatus === 'latest'} onChange={(event) => setDraft(event.target.checked)} data-release-draft />
               Черновик
             </label>
-            <label className="min-h-[42px] border border-[rgba(38,23,50,.12)] rounded-lg px-3 flex items-center gap-2 text-xs font-bold">
-              <input type="checkbox" checked={prerelease} onChange={(event) => setPrerelease(event.target.checked)} />
-              Pre-release
-            </label>
           </div>
+
+          <fieldset className="mt-4">
+            <legend className="text-xs font-bold">Статус релиза</legend>
+            <div className="mt-2 grid gap-2" role="radiogroup" aria-label="Статус релиза">
+              {RELEASE_STATUS_OPTIONS.map(option => {
+                const selected = releaseStatus === option.value;
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    data-release-status={option.value}
+                    className={`min-h-[52px] rounded-xl border px-3 py-2.5 text-left transition-colors ${selected ? 'border-[#AEA989] bg-[#F3EFE9] shadow-[0_0_0_3px_rgba(174,169,137,.18)]' : 'border-[rgba(38,23,50,.12)] hover:bg-[#F3EFE9]'}`}
+                    onClick={() => {
+                      setReleaseStatus(option.value);
+                      if (option.value === 'latest') setDraft(false);
+                    }}
+                  >
+                    <span className="block text-xs font-bold">{option.label}</span>
+                    <span className="block mt-0.5 text-xs font-normal leading-relaxed text-[#7D7482]">{option.description}</span>
+                  </button>
+                );
+              })}
+            </div>
+            {releaseStatus === 'latest' && <p className="mt-2 text-xs text-[#7D7482]">Последней версией может быть только опубликованный полный релиз.</p>}
+          </fieldset>
 
           <div className="flex flex-col-reverse sm:flex-row justify-end gap-2 mt-6">
             <button type="button" className="px-4 py-2 border border-[rgba(38,23,50,.12)] rounded-lg text-sm font-semibold" onClick={close}>

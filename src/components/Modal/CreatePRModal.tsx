@@ -2,6 +2,8 @@ import React, { useEffect, useState } from 'react';
 import { GitPullRequest, X } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { Branch } from '../../types';
+import { MarkdownEditor } from '../common/MarkdownEditor';
+import { SelectMenu } from '../common/SelectMenu';
 
 interface CreatePRModalProps {
   branches: Branch[];
@@ -58,7 +60,7 @@ export const CreatePRModal: React.FC<CreatePRModalProps> = ({ branches, repoFull
           <GitPullRequest size={25} />
         </div>
         <h2 id="create-pr-title" className="text-[23px] font-semibold mt-4 mb-1">Новый Pull Request</h2>
-        <p className="text-[11px] text-[#7D7482] leading-relaxed mb-5">
+        <p className="text-xs text-[#7D7482] leading-relaxed mb-5">
           Создайте pull request в <b className="text-[#261732]">{repoFullName}</b>
         </p>
 
@@ -77,42 +79,35 @@ export const CreatePRModal: React.FC<CreatePRModalProps> = ({ branches, repoFull
 
           <label className="block text-xs font-bold mt-4">
             Описание
-            <textarea
+            <MarkdownEditor
               value={body}
-              onChange={(event) => setBody(event.target.value)}
+              onValueChange={setBody}
               rows={4}
               placeholder="Опишите изменения..."
-              className="block w-full resize-none border border-[rgba(38,23,50,.12)] bg-[#F3EFE9] rounded-lg p-3 text-sm mt-2"
             />
           </label>
 
           <div className="grid grid-cols-2 gap-4 mt-4">
             <label className="block text-xs font-bold">
               Из ветки
-              <select
+              <SelectMenu
                 value={head}
-                onChange={(event) => setHead(event.target.value)}
-                required
-                className="block w-full h-[42px] border border-[rgba(38,23,50,.12)] bg-[#F3EFE9] rounded-lg px-3 text-sm mt-2"
-              >
-                <option value="">Выберите ветку</option>
-                {branches.map((branch) => (
-                  <option key={branch.name} value={branch.name}>{branch.name}</option>
-                ))}
-              </select>
+                onChange={setHead}
+                options={[{ value: '', label: 'Выберите ветку' }, ...branches.map(branch => ({ value: branch.name, label: branch.name }))]}
+                ariaLabel="Исходная ветка"
+                className="mt-2 h-[42px] text-sm"
+              />
             </label>
 
             <label className="block text-xs font-bold">
               В ветку
-              <select
+              <SelectMenu
                 value={base}
-                onChange={(event) => setBase(event.target.value)}
-                className="block w-full h-[42px] border border-[rgba(38,23,50,.12)] bg-[#F3EFE9] rounded-lg px-3 text-sm mt-2"
-              >
-                {branches.map((branch) => (
-                  <option key={branch.name} value={branch.name}>{branch.name}</option>
-                ))}
-              </select>
+                onChange={setBase}
+                options={branches.map(branch => ({ value: branch.name, label: branch.name }))}
+                ariaLabel="Целевая ветка"
+                className="mt-2 h-[42px] text-sm"
+              />
             </label>
           </div>
 

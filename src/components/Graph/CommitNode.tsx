@@ -1,54 +1,41 @@
 import React from 'react';
 import { GitMerge } from 'lucide-react';
-import { Commit } from '../../types';
+import { GraphNode } from '../../lib/graphLayout';
 
 interface CommitNodeProps {
-  commit: Commit;
+  commit: GraphNode;
   isSelected: boolean;
+  isHead: boolean;
   branchColor: string;
-  totalHeight: number;
-  onClick: () => void;
+  onClick: (sha: string) => void;
 }
 
-export const CommitNode: React.FC<CommitNodeProps> = ({
+const CommitNodeComponent: React.FC<CommitNodeProps> = ({
   commit,
   isSelected,
+  isHead,
   branchColor,
-  totalHeight,
   onClick,
-}) => {
-  const topPercent = (commit.y / totalHeight) * 100;
-
-  return (
-    <button
-      className={`absolute w-7 h-7 rounded-full grid place-items-center cursor-pointer ${isSelected ? 'z-10' : 'z-[1]'}`}
-      style={{
-        left: commit.x,
-        top: commit.y,
-        transform: 'translate(-50%, -50%)',
-      }}
-      onClick={onClick}
-      aria-label={`${commit.label}, ${commit.author}, ${commit.time}`}
+}) => (
+  <button
+    className={`absolute grid place-items-center cursor-pointer rounded-full ${isSelected || commit.isMerge ? 'w-9 h-9' : 'w-8 h-8'} ${isSelected ? 'z-10' : 'z-[1]'}`}
+    style={{
+      left: commit.x,
+      top: commit.y,
+      transform: 'translate(-50%, -50%)',
+    }}
+    onClick={() => onClick(commit.sha)}
+    aria-label={`${commit.message}, ${commit.author}, ${commit.date}${commit.isMerge ? ', merge-коммит' : ''}`}
+    title={commit.message}
+  >
+    {isHead && <span className="absolute inset-0 rounded-full border-2 border-[var(--sage)] opacity-85" aria-label="HEAD" />}
+    <span
+      className={`relative grid place-items-center rounded-full border-2 border-[var(--graph-node-ring)] transition-transform ${commit.isMerge ? 'h-6 w-6 shadow-[0_0_0_3px_rgba(142,124,163,.24)]' : 'h-4 w-4'} ${isSelected ? 'scale-125 shadow-lg' : 'hover:scale-125'}`}
+      style={{ backgroundColor: branchColor, color: '#261732' }}
     >
-      <span
-        className={`w-4 h-4 rounded-full border-2 border-[var(--graph-node-ring)] grid place-items-center transition-transform ${isSelected ? 'scale-125 shadow-lg' : 'hover:scale-125'}`}
-        style={{ backgroundColor: branchColor, color: '#261732' }}
-      >
-        {commit.merge && <GitMerge size={11} />}
-      </span>
+      {commit.isMerge && <GitMerge size={12} strokeWidth={2.5} aria-hidden="true" />}
+    </span>
+  </button>
+);
 
-      {isSelected && (
-        <span
-          className={`absolute px-3 py-2 rounded-lg border border-[rgba(38,23,50,.12)] bg-white shadow-md z-20 min-w-[160px] max-w-[220px] pointer-events-none text-left ${
-            topPercent > 70 ? 'bottom-full mb-1' : 'top-full mt-1'
-          }`}
-          style={{ left: '50%', transform: 'translateX(-50%)' }}
-        >
-          <b className="block text-[11px] text-[#261732] break-words">{commit.label}</b>
-          <small className="block text-[8px] text-[#7D7482] mt-0.5">{commit.author} · {commit.time}</small>
-          <small className="block text-[8px] text-[#AEA989] mt-0.5 font-mono">{commit.hash}</small>
-        </span>
-      )}
-    </button>
-  );
-};
+export const CommitNode = React.memo(CommitNodeComponent);

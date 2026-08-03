@@ -1,13 +1,16 @@
 {
   "appId": "com.gitora.app",
   "productName": "Gitora",
-  "artifactName": "${productName} ${version}.${ext}",
+  "artifactName": "Gitora Setup 0.2.${ext}",
   "directories": {
     "output": "outputs/release"
   },
   "files": [
     "dist/**/*",
-    "electron/**/*"
+    "electron/**/*",
+    "mcp-server.cjs",
+    "mcpConnectionManager.cjs",
+    "mcpRepository.cjs"
   ],
   "win": {
     "target": "nsis",

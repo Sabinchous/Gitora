@@ -9,7 +9,7 @@ interface SearchBarProps {
 }
 
 export const SearchBar: React.FC<SearchBarProps> = ({ owner, repo }) => {
-  const { searchCommits } = useApp();
+  const { searchCommits, commits, setSelectedCommit, openExternal } = useApp();
   const [query, setQuery] = useState('');
   const [author, setAuthor] = useState('');
   const [since, setSince] = useState('');
@@ -18,6 +18,7 @@ export const SearchBar: React.FC<SearchBarProps> = ({ owner, repo }) => {
   const [isSearching, setIsSearching] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
   const debounceRef = useRef<number | undefined>(undefined);
+  const searchRequestId = useRef(0);
 
   const handleSearch = useCallback(async () => {
     if (!query.trim() && !author.trim()) {
@@ -25,6 +26,7 @@ export const SearchBar: React.FC<SearchBarProps> = ({ owner, repo }) => {
       return;
     }
 
+    const currentRequest = ++searchRequestId.current;
     setIsSearching(true);
     try {
       const commits = await searchCommits(
@@ -35,9 +37,9 @@ export const SearchBar: React.FC<SearchBarProps> = ({ owner, repo }) => {
         since || undefined,
         until || undefined
       );
-      setResults(commits);
+      if (currentRequest === searchRequestId.current) setResults(commits);
     } finally {
-      setIsSearching(false);
+      if (currentRequest === searchRequestId.current) setIsSearching(false);
     }
   }, [owner, repo, query, author, since, until, searchCommits]);
 
@@ -53,14 +55,31 @@ export const SearchBar: React.FC<SearchBarProps> = ({ owner, repo }) => {
         window.clearTimeout(debounceRef.current);
       }
     };
-  }, [query, author, since, until]);
+  }, [owner, repo, query, author, since, until]);
+
+  useEffect(() => {
+    searchRequestId.current += 1;
+    setResults([]);
+    setIsSearching(false);
+  }, [owner, repo]);
 
   const clearSearch = () => {
+    searchRequestId.current += 1;
     setQuery('');
     setAuthor('');
     setSince('');
     setUntil('');
     setResults([]);
+  };
+
+  const openResult = (commit: GitHubCommit) => {
+    const loadedCommit = commits.find(item => item.id === commit.sha);
+    setResults([]);
+    if (loadedCommit) {
+      setSelectedCommit(loadedCommit);
+      return;
+    }
+    void openExternal(`https://github.com/${owner}/${repo}/commit/${commit.sha}`);
   };
 
   return (
@@ -96,7 +115,7 @@ export const SearchBar: React.FC<SearchBarProps> = ({ owner, repo }) => {
       {showFilters && (
         <div className="mt-2 p-3 bg-[#F3EFE9] rounded-lg flex flex-wrap gap-3">
           <label className="flex-1 min-w-[150px]">
-            <span className="text-[10px] font-bold text-[#7D7482] block mb-1">Автор</span>
+            <span className="text-xs font-bold text-[#7D7482] block mb-1">Автор</span>
             <div className="relative">
               <User size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-[#7D7482]" />
               <input
@@ -109,7 +128,7 @@ export const SearchBar: React.FC<SearchBarProps> = ({ owner, repo }) => {
             </div>
           </label>
           <label className="flex-1 min-w-[120px]">
-            <span className="text-[10px] font-bold text-[#7D7482] block mb-1">С даты</span>
+            <span className="text-xs font-bold text-[#7D7482] block mb-1">С даты</span>
             <input
               type="date"
               value={since}
@@ -118,7 +137,7 @@ export const SearchBar: React.FC<SearchBarProps> = ({ owner, repo }) => {
             />
           </label>
           <label className="flex-1 min-w-[120px]">
-            <span className="text-[10px] font-bold text-[#7D7482] block mb-1">По дату</span>
+            <span className="text-xs font-bold text-[#7D7482] block mb-1">По дату</span>
             <input
               type="date"
               value={until}
@@ -131,24 +150,26 @@ export const SearchBar: React.FC<SearchBarProps> = ({ owner, repo }) => {
 
       {results.length > 0 && (
         <div className="absolute left-0 right-0 mt-2 bg-white border border-[rgba(38,23,50,.12)] rounded-lg shadow-lg z-20 max-h-[300px] overflow-auto">
-          <div className="px-3 py-2 border-b border-[rgba(38,23,50,.08)] text-[10px] text-[#7D7482] font-semibold">
+          <div className="px-3 py-2 border-b border-[rgba(38,23,50,.08)] text-xs text-[#7D7482] font-semibold">
             Найдено: {results.length}
           </div>
           {results.map((commit) => (
-            <div
+            <button
+              type="button"
               key={commit.sha}
-              className="px-3 py-2 hover:bg-[#F3EFE9] border-b border-[rgba(38,23,50,.08)] last:border-0"
+              className="block w-full px-3 py-2 text-left hover:bg-[#F3EFE9] border-b border-[rgba(38,23,50,.08)] last:border-0"
+              onClick={() => openResult(commit)}
             >
               <div className="flex items-center gap-2">
                 <span className="text-xs font-mono text-[#7D7482]">{commit.sha.slice(0, 7)}</span>
                 <span className="text-xs truncate flex-1">{commit.commit.message.split('\n')[0]}</span>
               </div>
-              <div className="flex items-center gap-2 mt-1 text-[10px] text-[#7D7482]">
+              <div className="flex items-center gap-2 mt-1 text-xs text-[#7D7482]">
                 <span>{commit.commit.author.name}</span>
                 <span>•</span>
                 <span>{new Date(commit.commit.author.date).toLocaleDateString('ru-RU')}</span>
               </div>
-            </div>
+            </button>
           ))}
         </div>
       )}

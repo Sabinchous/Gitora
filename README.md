@@ -8,7 +8,7 @@
 - [Установка](#установка)
 - [Быстрый старт](#быстрый-старт)
   - [Скачать приложение](#1-скачать-приложение)
-  - [Подключить GitHub через Personal Access Token](#2-подключить-github-через-personal-access-token)
+  - [Подключение с Personal Access Token](#2-подключение-с-personal-access-token)
 - [Использование](#использование)
 - [Скриншоты](#скриншоты)
 - [MCP-сервер для ИИ-агентов](#mcp-сервер-для-ии-агентов)
@@ -39,23 +39,23 @@
 
 ## Установка
 
-1. Скачайте `Gitora 0.1.12.exe` из [GitHub Releases](https://github.com/Appappars/Gitora/releases/tag/v0.1.12) или из папки `outputs/release/` после сборки.
+1. Скачайте `Gitora Setup 0.2.exe` из [GitHub Releases](https://github.com/Appappars/Gitora/releases/tag/v0.2) или из папки `outputs/release/` после сборки.
 2. Запустите installer и выберите папку установки.
-3. Откройте Gitora и подключите GitHub Personal Access Token.
+3. Откройте Gitora и нажмите **Подключиться с PAT**.
 
-Поддерживаемая версия: **Gitora 0.1.12** для Windows. Portable-версия в текущей конфигурации не выпускается.
+Поддерживаемая версия: **Gitora 0.2** для Windows. Portable-версия в текущей конфигурации не выпускается.
 
 ## Быстрый старт
 
 ### 1. Скачать приложение
 
-Скачайте `Gitora 0.1.12.exe` из папки `outputs/release/` или загрузите с [GitHub Releases](https://github.com/Appappars/Gitora/releases/tag/v0.1.12).
+Скачайте `Gitora Setup 0.2.exe` из папки `outputs/release/` или загрузите с [GitHub Releases](https://github.com/Appappars/Gitora/releases/tag/v0.2).
 
 Запустите установщик и следуйте инструкциям.
 
-### 2. Подключить GitHub через Personal Access Token
+### 2. Подключение с Personal Access Token
 
-После установки Gitora попросит подключить GitHub. Для этого нужен **Personal Access Token** — ключ доступа, который позволяет приложению читать ваши репозитории, показывать коммиты, работать с ветками и выполнять действия от вашего имени.
+После установки Gitora нажмите **Подключиться с PAT**. Вставьте **Personal Access Token** — ключ доступа, который позволяет приложению читать ваши репозитории, показывать коммиты, работать с ветками и выполнять действия от вашего имени.
 
 На стартовом экране нажмите ссылку **GitHub Settings → Tokens**. Она откроет страницу настроек GitHub, где можно создать новый ключ доступа.
 
@@ -117,27 +117,18 @@ Gitora поддерживает светлую и тёмную тему.
 
 Gitora включает MCP-сервер, который позволяет ИИ-агентам (Claude, Cursor и др.) работать с вашими GitHub-данными.
 
-### Установка
+### Подключение
 
-1. Убедитесь, что Gitora установлена и вы залогинены
-2. Добавьте конфигурацию MCP в Claude Desktop:
+1. Запустите Gitora и войдите в GitHub.
+2. Откройте **Настройки → Интеграции → Подключение к ИИ**.
+3. Нажмите **Подключить** рядом с Claude Desktop, Cursor или Codex.
+4. Нажмите **Подключить сейчас**. Перезапуск ИИ-клиента нужен только при первой регистрации нового MCP-сервера.
 
-Файл: `%APPDATA%\Claude\claude_desktop_config.json`
+Node.js устанавливать не нужно: MCP-сервер и его зависимости уже входят в установщик Gitora. Gitora автоматически добавляет только своё подключение и сохраняет остальные MCP-серверы пользователя.
 
-```json
-{
-  "mcpServers": {
-    "gitora": {
-      "command": "node",
-      "args": ["C:\\Users\\<ваше_имя>\\Desktop\\Gitora\\mcp-server.cjs"]
-    }
-  }
-}
-```
+Для неподдерживаемого клиента нажмите **Настроить вручную** в этом же разделе, скопируйте готовую конфигурацию и нажмите **Подключить сейчас**. При первой регистрации нового MCP-сервера клиенту может потребоваться открыть новый чат.
 
-3. Перезапустите Claude Desktop
-
-MCP работает через локальный IPC-мост Gitora. Перед использованием запустите Gitora и войдите в GitHub. Сервер MCP не читает файл сессии и не хранит Personal Access Token в открытом виде: запросы к GitHub выполняет Electron main process, где токен остаётся в защищённом хранилище и памяти приложения.
+MCP работает через локальный IPC-мост Gitora. Перед использованием Gitora должна оставаться запущенной и авторизованной. ИИ-клиент не получает PAT: запросы к GitHub выполняет Electron main process, где токен остаётся в защищённом хранилище и памяти приложения.
 
 ### Инструменты MCP
 
@@ -188,7 +179,7 @@ npm run build
 npm run electron:build
 ```
 
-Сборка создаёт installer `outputs/release/Gitora 0.1.12.exe`. Настройка имени находится в `electron-builder.json`.
+Сборка создаёт installer `outputs/release/Gitora Setup 0.2.exe`. Настройка имени находится в `electron-builder.json`.
 
 ## Структура проекта
 
@@ -214,14 +205,11 @@ gitora/
 ```
 Разработано совместно Sabinchous и Appappars
 
-
-Видео для ознакомления с Gitora - https://youtu.be/cvgKoUQMLSU?si=B5XQ5HT9ino9PjUq
-
 ## Версия
 
-Current version: **0.1.12**
+Current version: **0.2**
 
-Релиз: [v0.1.12](https://github.com/Appappars/Gitora/releases/tag/v0.1.12)
+Релиз: [v0.2](https://github.com/Appappars/Gitora/releases/tag/v0.2)
 
 ## Лицензия
 

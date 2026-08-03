@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { BookOpen, LoaderCircle, Save, X } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { Branch } from '../../types';
+import { MarkdownEditor } from '../common/MarkdownEditor';
 
 interface ReadmeModalProps {
   branches: Branch[];
@@ -10,7 +11,7 @@ interface ReadmeModalProps {
 }
 
 export const ReadmeModal: React.FC<ReadmeModalProps> = ({ branches, repoFullName, defaultBranch }) => {
-  const { setReadmeOpen, getReadme, saveReadme, loading } = useApp();
+  const { setReadmeOpen, getReadme, saveReadme, loading, repositoryEmpty } = useApp();
   const [owner, repo] = repoFullName.split('/');
   const [branch, setBranch] = useState(defaultBranch || branches[0]?.name || 'main');
   const [content, setContent] = useState('');
@@ -82,9 +83,10 @@ export const ReadmeModal: React.FC<ReadmeModalProps> = ({ branches, repoFullName
           <BookOpen size={25} />
         </div>
         <h2 id="readme-title" className="text-[23px] font-semibold mt-4 mb-1">README</h2>
-        <p className="text-[11px] text-[#7D7482] leading-relaxed mb-5">
+        <p className="text-xs text-[#7D7482] leading-relaxed mb-5">
           Файл <b className="text-[#261732]">README.md</b> в <b className="text-[#261732]">{repoFullName}</b>
         </p>
+        {repositoryEmpty && <p className="mb-4 rounded-lg bg-[#F3EFE9] px-3 py-2 text-xs text-[#7D7482]">Сохранение создаст первый commit в пустом репозитории.</p>}
 
         <form onSubmit={submit}>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -114,16 +116,16 @@ export const ReadmeModal: React.FC<ReadmeModalProps> = ({ branches, repoFullName
 
           <label className="block text-xs font-bold mt-4">
             Markdown
-            <textarea
+            <MarkdownEditor
               autoFocus
               value={content}
-              onChange={(event) => {
-                setContent(event.target.value);
+              onValueChange={(nextContent) => {
+                setContent(nextContent);
                 setDirty(true);
               }}
               disabled={loading || readmeLoading}
               rows={14}
-              className="block w-full resize-y min-h-[260px] border border-[rgba(38,23,50,.12)] bg-[#F3EFE9] rounded-lg p-3 text-sm mt-2 font-mono disabled:opacity-50"
+              className="min-h-[260px] font-mono"
               placeholder={`# ${repo}\n\nОписание проекта.`}
             />
           </label>

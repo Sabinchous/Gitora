@@ -40,7 +40,7 @@ export const IssueList: React.FC<IssueListProps> = ({ owner, repo }) => {
           ))}
         </div>
         <button
-          className="h-[34px] bg-[#261732] text-[#E7E0D6] rounded-lg flex items-center gap-2 px-3 text-[11px] font-semibold"
+          className="h-[34px] bg-[#261732] text-[#E7E0D6] rounded-lg flex items-center gap-2 px-3 text-xs font-semibold"
           onClick={() => setIssueOpen(true)}
         >
           <Plus size={16} />
@@ -71,9 +71,9 @@ export const IssueList: React.FC<IssueListProps> = ({ owner, repo }) => {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-semibold truncate">{issue.title}</span>
-                      <span className="text-[10px] text-[#7D7482]">#{issue.number}</span>
+                      <span className="text-xs text-[#7D7482]">#{issue.number}</span>
                     </div>
-                    <div className="flex items-center gap-2 mt-1 text-[10px] text-[#7D7482]">
+                    <div className="flex items-center gap-2 mt-1 text-xs text-[#7D7482]">
                       <span className="flex items-center gap-1">
                         <User size={12} />
                         {issue.user?.login || 'Неизвестный'}
@@ -88,7 +88,7 @@ export const IssueList: React.FC<IssueListProps> = ({ owner, repo }) => {
                         {issue.labels.map((label) => (
                           <span
                             key={label.name}
-                            className="px-1.5 py-0.5 rounded text-[9px] font-medium"
+                            className="px-1.5 py-0.5 rounded text-xs font-medium"
                             style={{
                               backgroundColor: `#${label.color}`,
                               color: readableTextColor(label.color),

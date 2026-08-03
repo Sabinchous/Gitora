@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 const require = createRequire(import.meta.url);
 const {
   githubErrorMessage,
+  githubErrorCode,
   isAllowedGitHubDownloadUrl,
   isValidIssueNumber,
   isValidGitSha,
@@ -18,6 +19,21 @@ describe('githubErrorMessage', () => {
 
   it('keeps normal GitHub messages unchanged', () => {
     expect(githubErrorMessage(404, 'Not Found')).toBe('Not Found');
+  });
+});
+
+describe('githubErrorCode', () => {
+  it('classifies expired or invalid credentials', () => {
+    expect(githubErrorCode(401, 'Bad credentials')).toBe('auth');
+  });
+
+  it('classifies repository permission failures', () => {
+    expect(githubErrorCode(403, 'Resource not accessible by personal access token', '/user/repos')).toBe('permissions');
+    expect(githubErrorCode(403, 'Resource not accessible by integration', '/repos/me/demo/contents/hello.py')).toBe('permissions');
+  });
+
+  it('classifies GitHub service failures', () => {
+    expect(githubErrorCode(503, 'Service unavailable')).toBe('github');
   });
 });
 

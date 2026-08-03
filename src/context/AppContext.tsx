@@ -7,13 +7,21 @@ import React, {
   useState,
 } from 'react';
 import {
+  AiClientId,
+  AiClientStatus,
+  AiClientSetupResult,
+  AiConnectionStatus,
+  AiDiagnosticsResult,
+  McpWriteStatus,
   Branch,
   Commit,
+  CommitDetails,
   CommitResult,
   CreateReleaseInput,
   CreateRepositoryResult,
   DownloadOptions,
   FolderChangesSummary,
+  GitFolderChangesSummary,
   GitHubCommit,
   GitHubIssue,
   GitHubPR,
@@ -23,13 +31,23 @@ import {
   Release,
   ReleaseAssetSelection,
   UploadFolderSummary,
+  BranchDirection,
 } from '../types';
 import { computeGraphLayout, GraphLayoutResult } from '../lib/graphLayout';
+import { mapCommitDetails } from '../lib/commitDetails';
 import { applyThemePreference, readThemePreference } from '../lib/theme';
+import { connectionError, ConnectionErrorInfo } from '../lib/connectionErrors';
+import {
+  mergeBranchPreferences,
+  migrateBranchPreference,
+  removeBranchPreference,
+  updateBranchPreference,
+} from '../lib/branchPreferences';
 
 interface AppState {
   project: Project | null;
   selectedCommit: Commit | null;
+  commitStatsLoading: boolean;
   branchFilter: string;
   mobileOpen: boolean;
   createOpen: boolean;
@@ -45,6 +63,7 @@ interface AppState {
   projects: Project[];
   commits: Commit[];
   branches: Branch[];
+  repositoryEmpty: boolean;
   user: GitHubUser | null;
   connected: boolean;
   loading: boolean;
@@ -53,6 +72,11 @@ interface AppState {
   lastUpdatedAt: string | null;
   releases: Release[];
   currentVersion: string;
+  connectionError: ConnectionErrorInfo | null;
+  aiOpen: boolean;
+  aiStatus: AiConnectionStatus;
+  aiDiagnostics: AiDiagnosticsResult | null;
+  aiDiagnosticsLoading: boolean;
 }
 
 interface AppContextType extends AppState {
@@ -69,8 +93,10 @@ interface AppContextType extends AppState {
   setReleaseOpen: (open: boolean) => void;
   setReadmeOpen: (open: boolean) => void;
   setChangesOpen: (open: boolean) => void;
+  setAiOpen: (open: boolean) => void;
   notify: (text: string) => void;
   login: (token: string) => Promise<void>;
+  clearConnectionError: () => void;
   logout: () => Promise<void>;
   createRepo: (name: string, description: string, isPrivate: boolean, folderPath?: string) => Promise<CreateRepositoryResult | null>;
   deleteRepo: (owner: string, repo: string) => Promise<boolean>;
@@ -78,6 +104,7 @@ interface AppContextType extends AppState {
   createBranch: (owner: string, repo: string, name: string, fromSha: string) => Promise<boolean>;
   deleteBranch: (owner: string, repo: string, branch: string) => Promise<boolean>;
   renameBranch: (owner: string, repo: string, branch: string, newName: string) => Promise<boolean>;
+  updateBranchVisualSettings: (branchName: string, changes: { color?: string; direction?: BranchDirection }) => void;
   pullRequests: GitHubPR[];
   selectedPR: GitHubPR | null;
   setSelectedPR: (pr: GitHubPR | null) => void;
@@ -100,6 +127,11 @@ interface AppContextType extends AppState {
   checkFolderChanges: (owner: string, repo: string, branch: string, folderPath: string) => Promise<FolderChangesSummary | null>;
   commitFolderChanges: (owner: string, repo: string, branch: string, folderPath: string, message: string) => Promise<CommitResult | null>;
   searchCommits: (owner: string, repo: string, query: string, author?: string, since?: string, until?: string) => Promise<GitHubCommit[]>;
+  getLatestCommit: (owner: string, repo: string) => Promise<GitHubCommit | null>;
+  loadCommitDetail: (sha: string) => Promise<CommitDetails | null>;
+  loadCommitDetails: (shas: string[]) => Promise<void>;
+  checkGitFolderChanges: (folderPath: string, targetBranch: string) => Promise<GitFolderChangesSummary | null>;
+  commitGitFolderChanges: (folderPath: string, targetBranch: string, message: string, push: boolean) => Promise<CommitResult | null>;
   selectUploadFolder: () => Promise<UploadFolderSummary | null>;
   selectReleaseAsset: () => Promise<ReleaseAssetSelection | null>;
   clearUploadFolder: () => Promise<void>;
@@ -109,11 +141,17 @@ interface AppContextType extends AppState {
   downloadArchive: (owner: string, repo: string, sha: string) => Promise<string | null>;
   refreshRepositoryData: () => Promise<boolean>;
   syncAllData: () => Promise<boolean>;
+  refreshAiStatus: () => Promise<AiConnectionStatus | null>;
+  runAiDiagnostics: () => Promise<AiDiagnosticsResult | null>;
+  configureAiClient: (client: AiClientId) => Promise<AiClientSetupResult | null>;
+  disconnectAiClient: (client: AiClientId) => Promise<AiClientStatus | null>;
+  restartMcp: () => Promise<AiConnectionStatus | null>;
+  allowMcpWrites: () => Promise<McpWriteStatus | null>;
+  revokeMcpWrites: () => Promise<McpWriteStatus | null>;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
 const PROJECT_COLORS = ['#AEA989', '#8E7CA3', '#C58C75', '#5D7659'];
-const BRANCH_COLORS = ['var(--branch-main)', 'var(--branch-1)', 'var(--branch-2)', 'var(--branch-3)', 'var(--branch-4)', 'var(--branch-5)'];
 
 function readDownloadOptions(): DownloadOptions {
   try {
@@ -142,6 +180,47 @@ function readCommitLimit(): number {
   }
 }
 
+const AI_TOOL_NAMES = [
+  ['list_repos', 'Список репозиториев', 'Показывает доступные GitHub-репозитории.', true],
+  ['get_commits', 'История коммитов', 'Возвращает коммиты выбранного репозитория.', true],
+  ['get_branches', 'Ветки', 'Показывает ветки и их последние коммиты.', true],
+  ['get_commit_detail', 'Детали коммита', 'Показывает файлы, additions и deletions.', true],
+  ['search_commits', 'Поиск коммитов', 'Ищет коммиты по сообщению или автору.', true],
+  ['create_repo_file', 'Первый файл репозитория', 'Создаёт файл и первый commit в пустом репозитории.', false],
+  ['create_issue', 'Создать Issue', 'Создаёт Issue в репозитории.', false],
+  ['add_issue_comment', 'Комментарий к Issue/PR', 'Добавляет комментарий к Issue или Pull Request.', false],
+  ['create_pull_request', 'Создать Pull Request', 'Создаёт Pull Request в репозитории.', false],
+  ['get_git_commit_object', 'Git-объект commit', 'Читает raw commit object и SHA дерева.', true],
+  ['create_git_blob', 'Git blob', 'Создаёт объект содержимого файла.', false],
+  ['create_git_tree', 'Git tree', 'Создаёт дерево файлов.', false],
+  ['create_git_commit', 'Git commit', 'Создаёт commit в репозитории.', false],
+  ['create_git_branch', 'Создать ветку', 'Создаёт ветку от SHA коммита.', false],
+  ['update_git_branch', 'Переместить ветку', 'Перемещает ветку на другой SHA без force push.', false],
+] as const;
+
+const DEFAULT_AI_STATUS: AiConnectionStatus = {
+  level: 'not_configured',
+  label: 'Не настроено',
+  githubConnected: false,
+  githubAuth: { user: '', authType: 'None', tokenSource: 'none', permissions: {}, scopes: [], acceptedScopes: [], acceptedPermissions: {}, repository: '', permissionChecks: [] },
+  mcpConfig: { configPath: '—', loaded: false, server: 'manual client' },
+  mcpStartup: { started: false, pid: 0, toolsLoaded: 0 },
+  mcpClient: { connected: false, session: '' },
+  mcpWritesAllowed: false,
+  mcpRunning: false,
+  mcpServerPath: 'Встроенный сервер Gitora',
+  mcpMetadataPath: '—',
+  mcpSessionId: '',
+  currentRepository: '',
+  repositoryAvailable: false,
+  toolCount: AI_TOOL_NAMES.length,
+  tools: AI_TOOL_NAMES.map(([name, label, description, readOnly]) => ({ name, label, description, readOnly, available: false })),
+  client: { id: 'manual', label: 'MCP-клиент', configured: false, requiresRestart: false, configPath: '', supported: true, installed: true, connected: false },
+  clients: [],
+  configTemplate: JSON.stringify({ mcpServers: { gitora: { command: 'Gitora', args: ['--mcp-server'] } } }, null, 2),
+  activity: [],
+};
+
 export const useApp = () => {
   const context = useContext(AppContext);
   if (!context) throw new Error('useApp must be used within an AppProvider');
@@ -157,6 +236,7 @@ function mapProjects(repos: GitHubRepo[]): Project[] {
     commits: 0,
     branches: 0,
     updated: new Date(repo.updated_at).toLocaleDateString('ru-RU'),
+    updatedAt: repo.updated_at,
     description: repo.description || '',
     isPrivate: repo.private,
     defaultBranch: repo.default_branch || 'main',
@@ -165,30 +245,37 @@ function mapProjects(repos: GitHubRepo[]): Project[] {
 
 function mapCommits(data: GitHubCommit[], layout: GraphLayoutResult): Commit[] {
   const commitBySha = new Map(data.map(commit => [commit.sha, commit]));
-  return layout.nodes.map((node, index) => ({
-    id: node.sha,
-    x: node.x,
-    y: node.y,
-    lane: node.lane,
-    row: node.row,
-    branch: node.branch,
-    label: node.message,
-    author: node.author,
-    time: node.date,
-    hash: node.sha.slice(0, 7),
-    text: commitBySha.get(node.sha)?.commit.message ?? node.message,
-    files: 0,
-    plus: 0,
-    minus: 0,
-    merge: node.isMerge,
-    current: index === 0,
-    parents: node.parents,
-  }));
+  return layout.nodes.map((node, index) => {
+    const details = mapCommitDetails(commitBySha.get(node.sha));
+    return {
+      id: node.sha,
+      x: node.x,
+      y: node.y,
+      lane: node.lane,
+      row: node.row,
+      branch: node.branch,
+      label: node.message,
+      author: node.author,
+      time: node.date,
+      hash: node.sha.slice(0, 7),
+      text: commitBySha.get(node.sha)?.commit.message ?? node.message,
+      files: details?.files ?? 0,
+      plus: details?.plus ?? 0,
+      minus: details?.minus ?? 0,
+      changeStats: details,
+      filesChanged: details?.filesChanged,
+      statsStatus: details ? 'loaded' : 'idle',
+      merge: node.isMerge,
+      current: index === 0,
+      parents: node.parents,
+    };
+  });
 }
 
 export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [project, setProject] = useState<Project | null>(null);
   const [selectedCommit, setSelectedCommit] = useState<Commit | null>(null);
+  const [commitStatsLoading, setCommitStatsLoading] = useState(false);
   const [branchFilter, setBranchFilter] = useState('all');
   const [mobileOpen, setMobileOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
@@ -204,6 +291,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [projects, setProjects] = useState<Project[]>([]);
   const [commits, setCommits] = useState<Commit[]>([]);
   const [branches, setBranches] = useState<Branch[]>([]);
+  const [repositoryEmpty, setRepositoryEmpty] = useState(false);
+  const [repositoryCommits, setRepositoryCommits] = useState<GitHubCommit[]>([]);
   const [user, setUser] = useState<GitHubUser | null>(null);
   const [connected, setConnected] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -211,10 +300,20 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [graphLayout, setGraphLayout] = useState<GraphLayoutResult | null>(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
   const [releases, setReleases] = useState<Release[]>([]);
-  const [currentVersion, setCurrentVersion] = useState('0.1.12');
+  const [currentVersion, setCurrentVersion] = useState('0.2');
+  const [connectionFailure, setConnectionFailure] = useState<ConnectionErrorInfo | null>(null);
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiStatus, setAiStatus] = useState<AiConnectionStatus>(DEFAULT_AI_STATUS);
+  const [aiDiagnostics, setAiDiagnostics] = useState<AiDiagnosticsResult | null>(null);
+  const [aiDiagnosticsLoading, setAiDiagnosticsLoading] = useState(false);
   const toastTimer = useRef<number | undefined>(undefined);
   const requestId = useRef(0);
   const initialized = useRef(false);
+  const mcpConnecting = useRef(false);
+  const projectRef = useRef<Project | null>(null);
+  const commitStatsCache = useRef(new Map<string, CommitDetails>());
+  const commitStatsRequests = useRef(new Map<string, Promise<CommitDetails | null>>());
+  projectRef.current = project;
 
   const notify = (text: string) => {
     window.clearTimeout(toastTimer.current);
@@ -227,12 +326,138 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     window.setTimeout(() => setError(null), 5000);
   };
 
+  const showConnectionError = (errorCode?: string, message?: string) => {
+    setConnectionFailure(connectionError(errorCode, message));
+  };
+
+  const clearConnectionError = () => setConnectionFailure(null);
+
+  const refreshAiStatus = async (): Promise<AiConnectionStatus | null> => {
+    try {
+      const result = await window.electronAPI?.app.getAiStatus();
+      if (result?.success && result.data) {
+        const mcpReady = result.data.mcpClient.connected || result.data.tools.some(tool => tool.available);
+        if (mcpReady) mcpConnecting.current = false;
+        const status = mcpReady
+          ? { ...result.data, level: 'ready' as const, label: 'Подключено' }
+          : mcpConnecting.current
+            ? { ...result.data, level: 'attention' as const, label: 'Подключение...' }
+            : result.data;
+        setAiStatus(status);
+        return status;
+      }
+    } catch {
+      // Состояние ИИ не должно блокировать GitHub, граф или загрузку репозитория.
+    }
+    return null;
+  };
+
+  const runAiDiagnostics = async (): Promise<AiDiagnosticsResult | null> => {
+    if (!window.electronAPI) {
+      notify('Диагностика доступна в приложении Gitora');
+      return null;
+    }
+    setAiDiagnosticsLoading(true);
+    const [owner, repo] = projectRef.current?.repo.split('/') || [];
+    const result = await window.electronAPI.app.runAiDiagnostics(owner, repo, commits[0]?.id);
+    setAiDiagnosticsLoading(false);
+    if (result.success && result.data) {
+      setAiDiagnostics(result.data);
+      setAiStatus(result.data.status);
+      return result.data;
+    }
+    notify(result.error || 'Не удалось выполнить диагностику подключения к ИИ');
+    return null;
+  };
+
+  const configureAiClient = async (client: AiClientId): Promise<AiClientSetupResult | null> => {
+    if (!window.electronAPI) {
+      notify('Подключение MCP доступно в приложении Gitora');
+      return null;
+    }
+    const result = await window.electronAPI?.app.configureAiClient(client);
+    if (result?.success && result.data) {
+      setAiStatus(current => ({
+        ...current,
+        client: result.data!.client,
+        configTemplate: result.data!.configTemplate,
+        level: 'attention',
+        label: 'Ожидает MCP-сессию — подключить сейчас',
+      }));
+      notify(result.data.backupPath ? 'Конфигурация обновлена. Резервная копия создана.' : 'Конфигурация ИИ подготовлена');
+      return result.data;
+    }
+    notify(result?.error || 'Не удалось настроить ИИ-клиент');
+    return null;
+  };
+
+  const disconnectAiClient = async (client: AiClientId): Promise<AiClientStatus | null> => {
+    const result = await window.electronAPI?.app.disconnectAiClient(client);
+    if (result?.success && result.data) {
+      await refreshAiStatus();
+      notify(`${result.data.label}: Gitora отключена`);
+      return result.data;
+    }
+    notify(result?.error || 'Не удалось отключить Gitora');
+    return null;
+  };
+
+  const restartMcp = async (): Promise<AiConnectionStatus | null> => {
+    mcpConnecting.current = true;
+    setAiStatus(current => ({ ...current, level: 'attention', label: 'Подключение...' }));
+    const result = await window.electronAPI?.app.restartMcp();
+    if (result?.success && result.data) {
+      let latest = result.data;
+      const deadline = Date.now() + 30_000;
+      while (!(latest.mcpClient.connected || latest.tools.some(tool => tool.available)) && Date.now() < deadline) {
+        await new Promise(resolve => window.setTimeout(resolve, 500));
+        const refreshed = await refreshAiStatus();
+        if (refreshed) latest = refreshed;
+      }
+      mcpConnecting.current = false;
+      const finalStatus = await refreshAiStatus();
+      if (finalStatus) latest = finalStatus;
+      setAiStatus(latest);
+      notify(latest.mcpClient.connected || latest.tools.some(tool => tool.available)
+        ? 'MCP подключён без перезапуска ИИ-клиента'
+        : 'Bridge обновлён, но MCP-клиент пока не подключился');
+      return latest;
+    }
+    mcpConnecting.current = false;
+    await refreshAiStatus();
+    notify(result?.error || 'Не удалось перезапустить MCP-мост');
+    return null;
+  };
+
+  const allowMcpWrites = async (): Promise<McpWriteStatus | null> => {
+    const result = await window.electronAPI?.app.allowMcpWrites();
+    if (result?.success && result.data) {
+      setAiStatus(current => ({ ...current, ...result.data }));
+      notify('Запись MCP разрешена на 10 минут');
+      return result.data;
+    }
+    notify(result?.error || 'Не удалось разрешить запись MCP');
+    return null;
+  };
+
+  const revokeMcpWrites = async (): Promise<McpWriteStatus | null> => {
+    const result = await window.electronAPI?.app.revokeMcpWrites();
+    if (result?.success && result.data) {
+      setAiStatus(current => ({ ...current, ...result.data }));
+      notify('Запись MCP отключена');
+      return result.data;
+    }
+    notify(result?.error || 'Не удалось отключить запись MCP');
+    return null;
+  };
+
   const loadRepos = async () => {
     const result = await window.electronAPI?.github.getRepos();
     if (!result?.success || !result.data) {
-      showError(result?.error || 'Не удалось загрузить репозитории');
+      showConnectionError(result?.errorCode, result?.error || 'Не удалось загрузить репозитории');
       return;
     }
+    clearConnectionError();
     const nextProjects = mapProjects(result.data);
     setProjects(nextProjects);
     setProject(current => current
@@ -251,10 +476,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     if (result.success && result.data) {
       setUser(result.data);
       setConnected(true);
+      clearConnectionError();
       setLoginOpen(false);
       await loadRepos();
     } else {
-      showError(result.error || 'Не удалось подключить GitHub');
+      showConnectionError(result.errorCode, result.error || 'Не удалось подключить GitHub');
     }
     setLoading(false);
   };
@@ -268,9 +494,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setProject(null);
     setCommits([]);
     setBranches([]);
+    setRepositoryEmpty(false);
     setSelectedCommit(null);
+    commitStatsCache.current.clear();
+    commitStatsRequests.current.clear();
+    setCommitStatsLoading(false);
     setGraphLayout(null);
     setLastUpdatedAt(null);
+    setConnectionFailure(null);
     notify('GitHub отключён');
   };
 
@@ -355,6 +586,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         showError(result?.error || 'Не удалось удалить ветку');
         return false;
       }
+      removeBranchPreference(`${owner}/${repo}`, branch);
       notify(`Ветка «${branch}» удалена`);
       await refreshRepositoryData();
       return true;
@@ -371,12 +603,35 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         showError(result?.error || 'Не удалось переименовать ветку');
         return false;
       }
+      migrateBranchPreference(`${owner}/${repo}`, branch, newName);
       notify(`Ветка переименована в «${newName}»`);
       await refreshRepositoryData();
       return true;
     } finally {
       setLoading(false);
     }
+  };
+
+  const updateBranchVisualSettings = (branchName: string, changes: { color?: string; direction?: BranchDirection }) => {
+    if (!project) return;
+    updateBranchPreference(project.repo, branchName, changes);
+    setBranches(current => {
+      const nextBranches = current.map(branch => branch.name === branchName
+        ? { ...branch, ...changes }
+        : branch);
+      if (nextBranches.every((branch, index) => branch === current[index])) return current;
+      if (repositoryCommits.length) {
+        const layout = computeGraphLayout(repositoryCommits, nextBranches);
+        setGraphLayout(layout);
+        setCommits(mapCommits(repositoryCommits, layout));
+      } else if (graphLayout) {
+        setGraphLayout({
+          ...graphLayout,
+          branchColors: Object.fromEntries(nextBranches.map(branch => [branch.name, branch.color])),
+        });
+      }
+      return nextBranches;
+    });
   };
 
   const [pullRequests, setPullRequests] = useState<GitHubPR[]>([]);
@@ -480,6 +735,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return false;
       }
       notify(result.data.changed ? 'README сохранён' : 'README без изменений');
+      if (result.data.changed) await refreshRepositoryData();
       return true;
     } finally {
       setLoading(false);
@@ -513,12 +769,46 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
   };
 
+  const checkGitFolderChanges = async (folderPath: string, targetBranch: string): Promise<GitFolderChangesSummary | null> => {
+    const result = await window.electronAPI?.github.checkGitFolderChanges(folderPath, targetBranch);
+    if (result?.success && result.data) return result.data;
+    return null;
+  };
+
+  const commitGitFolderChanges = async (
+    folderPath: string,
+    targetBranch: string,
+    message: string,
+    push: boolean,
+  ): Promise<CommitResult | null> => {
+    setLoading(true);
+    try {
+      const result = await window.electronAPI?.github.commitGitFolderChanges(folderPath, targetBranch, message, push);
+      if (!result?.success || !result.data) {
+        showError(result?.error || 'Не удалось создать локальный commit');
+        return null;
+      }
+      notify(result.data.changed
+        ? (push ? `Commit создан и отправлен: ${result.data.sha.slice(0, 7)}` : `Локальный commit создан: ${result.data.sha.slice(0, 7)}`)
+        : 'Изменений нет');
+      return result.data;
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const searchCommits = async (owner: string, repo: string, query: string, author?: string, since?: string, until?: string): Promise<GitHubCommit[]> => {
     const result = await window.electronAPI?.github.searchCommits(owner, repo, query, author, since, until);
     if (result?.success && result.data) {
       return result.data;
     }
     return [];
+  };
+
+  const getLatestCommit = async (owner: string, repo: string): Promise<GitHubCommit | null> => {
+    const result = await window.electronAPI?.github.getLatestCommit(owner, repo);
+    if (result?.success) return result.data ?? null;
+    return null;
   };
 
   const selectReleaseAsset = async (): Promise<ReleaseAssetSelection | null> => {
@@ -601,11 +891,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const [owner, repo] = targetProject.repo.split('/');
 
     if (clearBeforeLoad) {
+      commitStatsCache.current.clear();
       setBranchFilter('all');
       setSelectedCommit(null);
       setGraphLayout(null);
       setCommits([]);
       setBranches([]);
+      setRepositoryEmpty(false);
+      setRepositoryCommits([]);
       setLastUpdatedAt(null);
     }
 
@@ -621,14 +914,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
 
       const repository = result.data;
-      const nextBranches = repository.branches.map((branch, index): Branch => ({
+      setRepositoryEmpty(Boolean(repository.empty));
+      const nextBranches = mergeBranchPreferences(targetProject.repo, repository.branches.map(branch => ({
         name: branch.name,
         tipSha: branch.commit.sha,
-        color: branch.name === 'main' || branch.name === 'master'
-          ? 'var(--branch-main)'
-          : BRANCH_COLORS[(index + 1) % BRANCH_COLORS.length],
-      }));
+      })));
       const layout = computeGraphLayout(repository.commits, nextBranches);
+      setRepositoryCommits(repository.commits);
       setBranches(nextBranches);
       setGraphLayout(layout);
       setCommits(mapCommits(repository.commits, layout));
@@ -646,6 +938,90 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     } finally {
       if (currentRequest === requestId.current) setLoading(false);
     }
+  };
+
+  const applyCommitStats = (sha: string, details: CommitDetails | undefined, status: Commit['statsStatus']) => {
+    setCommits(current => current.map(commit => commit.id === sha
+      ? {
+        ...commit,
+        files: details?.files ?? commit.files,
+        plus: details?.plus ?? commit.plus,
+        minus: details?.minus ?? commit.minus,
+        changeStats: details ?? commit.changeStats,
+        filesChanged: details?.filesChanged ?? commit.filesChanged,
+        statsStatus: status,
+      }
+      : commit));
+    setSelectedCommit(current => current?.id === sha
+      ? {
+        ...current,
+        files: details?.files ?? current.files,
+        plus: details?.plus ?? current.plus,
+        minus: details?.minus ?? current.minus,
+        changeStats: details ?? current.changeStats,
+        filesChanged: details?.filesChanged ?? current.filesChanged,
+        statsStatus: status,
+      }
+      : current);
+  };
+
+  const loadCommitDetail = async (sha: string): Promise<CommitDetails | null> => {
+    const cached = commitStatsCache.current.get(sha);
+    if (cached) {
+      applyCommitStats(sha, cached, 'loaded');
+      return cached;
+    }
+
+    const pending = commitStatsRequests.current.get(sha);
+    if (pending) return pending;
+
+    const targetProject = projectRef.current;
+    if (!targetProject || !window.electronAPI) return null;
+    const [owner, repo] = targetProject.repo.split('/');
+    applyCommitStats(sha, undefined, 'loading');
+
+    const request = (async () => {
+      try {
+        const result = await window.electronAPI!.github.getCommitDetail(owner, repo, sha);
+        if (projectRef.current?.id !== targetProject.id) return null;
+        if (!result.success || !result.data) {
+          applyCommitStats(sha, undefined, 'error');
+          return null;
+        }
+        const details = mapCommitDetails(result.data) || { files: 0, plus: 0, minus: 0, filesChanged: [] };
+        commitStatsCache.current.set(sha, details);
+        applyCommitStats(sha, details, 'loaded');
+        return details;
+      } catch {
+        if (projectRef.current?.id === targetProject.id) applyCommitStats(sha, undefined, 'error');
+        return null;
+      } finally {
+        commitStatsRequests.current.delete(sha);
+        setCommitStatsLoading(commitStatsRequests.current.size > 0);
+      }
+    })();
+
+    commitStatsRequests.current.set(sha, request);
+    setCommitStatsLoading(true);
+    return request;
+  };
+
+  const loadCommitDetails = async (shas: string[]): Promise<void> => {
+    const uniqueShas = [...new Set(shas)].filter(sha => !commitStatsCache.current.has(sha));
+    if (!uniqueShas.length) return;
+
+    let cursor = 0;
+    let failed = 0;
+    const workerCount = Math.min(4, uniqueShas.length);
+    await Promise.all(Array.from({ length: workerCount }, async () => {
+      while (cursor < uniqueShas.length) {
+        const sha = uniqueShas[cursor];
+        cursor += 1;
+        const details = await loadCommitDetail(sha);
+        if (!details) failed += 1;
+      }
+    }));
+    if (failed) notify(`Не удалось загрузить статистику для ${failed} коммитов`);
   };
 
   const refreshRepositoryData = async (): Promise<boolean> => {
@@ -684,6 +1060,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setGraphLayout(null);
         setCommits([]);
         setBranches([]);
+        setRepositoryEmpty(false);
+        setRepositoryCommits([]);
         setLastUpdatedAt(null);
         notify('Обновлено');
         return true;
@@ -722,13 +1100,24 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setConnected(true);
         await loadRepos();
       } else {
+        if (sessionResult.error || sessionResult.errorCode) {
+          showConnectionError(sessionResult.errorCode, sessionResult.error);
+        }
         setLoginOpen(true);
       }
       setLoading(false);
+      void refreshAiStatus();
       void loadReleases();
     };
     void restore();
     return () => window.clearTimeout(toastTimer.current);
+  }, []);
+
+  useEffect(() => {
+    if (!window.electronAPI) return;
+    void refreshAiStatus();
+    const timer = window.setInterval(() => void refreshAiStatus(), 3000);
+    return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -751,6 +1140,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     <AppContext.Provider value={{
       project,
       selectedCommit,
+      commitStatsLoading,
       branchFilter,
       mobileOpen,
       createOpen,
@@ -762,10 +1152,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       releaseOpen,
       readmeOpen,
       changesOpen,
+      aiOpen,
       toast,
       projects,
       commits,
       branches,
+      repositoryEmpty,
       user,
       connected,
       loading,
@@ -774,6 +1166,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       lastUpdatedAt,
       releases,
       currentVersion,
+      connectionError: connectionFailure,
+      aiStatus,
+      aiDiagnostics,
+      aiDiagnosticsLoading,
       setProject,
       setSelectedCommit,
       setBranchFilter,
@@ -787,8 +1183,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setReleaseOpen,
       setReadmeOpen,
       setChangesOpen,
+      setAiOpen,
       notify,
       login,
+      clearConnectionError,
       logout,
       createRepo,
       deleteRepo,
@@ -796,6 +1194,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       createBranch,
       deleteBranch,
       renameBranch,
+      updateBranchVisualSettings,
       pullRequests,
       selectedPR,
       setSelectedPR,
@@ -817,7 +1216,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       saveReadme,
       checkFolderChanges,
       commitFolderChanges,
+      checkGitFolderChanges,
+      commitGitFolderChanges,
       searchCommits,
+      getLatestCommit,
+      loadCommitDetail,
+      loadCommitDetails,
       selectReleaseAsset,
       selectUploadFolder,
       clearUploadFolder,
@@ -827,6 +1231,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       downloadArchive,
       refreshRepositoryData,
       syncAllData,
+      refreshAiStatus,
+      runAiDiagnostics,
+      configureAiClient,
+      disconnectAiClient,
+      restartMcp,
+      allowMcpWrites,
+      revokeMcpWrites,
     }}>
       {children}
     </AppContext.Provider>

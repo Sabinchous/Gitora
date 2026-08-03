@@ -1,7 +1,7 @@
 {
   "name": "gitora",
   "private": true,
-  "version": "0.1.12",
+  "version": "0.2.0",
   "description": "Desktop GitHub history graph",
   "author": "Gitora",
   "type": "module",
@@ -9,20 +9,19 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:electron": "electron scripts/smoke-electron.cjs",
-    "preview": "vite preview",
-    "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron . --dev\"",
-    "electron:build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-electron.ps1"
+    "electron:dev": "concurrently -k \"npm run dev\" \"wait-on http://localhost:5173 && electron . --dev\"",
+    "electron:build": "powershell -ExecutionPolicy Bypass -File scripts/build-electron.ps1"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "ignore": "^7.0.5",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
     "@tailwindcss/vite": "^4.3.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
@@ -32,7 +31,6 @@
     "electron-builder": "^26.15.3",
     "tailwindcss": "^4.3.1",
     "typescript": "^6.0.3",
-    "vite": "^6.1.0",
     "vitest": "^4.1.9",
     "wait-on": "^8.0.1"
   }

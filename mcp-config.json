@@ -2,7 +2,7 @@
   "mcpServers": {
     "gitora": {
       "command": "node",
-      "args": ["C:\\Path\\To\\Gitora\\mcp-server.cjs"]
+      "args": ["mcp-server.cjs"]
     }
   }
 }

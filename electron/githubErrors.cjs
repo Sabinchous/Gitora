@@ -5,6 +5,30 @@ function githubErrorMessage(status, message, endpoint = '', method = 'GET') {
   return message || `GitHub API: ${status}`;
 }
 
+function githubErrorCode(status, message = '', endpoint = '') {
+  const normalized = String(message).toLowerCase();
+
+  if (status === 401 || normalized.includes('bad credentials') || normalized.includes('requires authentication')) {
+    return 'auth';
+  }
+
+  if (
+    status === 403
+    && (
+      endpoint.startsWith('/user/repos')
+      || normalized.includes('resource not accessible')
+      || normalized.includes('permission')
+      || normalized.includes('forbidden')
+      || normalized.includes('scope')
+    )
+  ) {
+    return 'permissions';
+  }
+
+  if (status === 408 || status === 429 || status >= 500) return 'github';
+  return 'unknown';
+}
+
 function isAllowedGitHubDownloadUrl(rawUrl) {
   try {
     const url = new URL(rawUrl);
@@ -44,6 +68,7 @@ function isValidCommitLimit(value) {
 
 module.exports = {
   githubErrorMessage,
+  githubErrorCode,
   isAllowedGitHubDownloadUrl,
   isValidIssueNumber,
   isValidGitSha,

@@ -1,9 +1,17 @@
 import React, { useEffect, useState } from 'react';
 import { ArrowRight, ExternalLink, Github, Key, Shield, X } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { ConnectionErrorPanel } from '../common/ConnectionErrorPanel';
 
 export const LoginModal: React.FC = () => {
-  const { setLoginOpen, login, loading, openExternal } = useApp();
+  const {
+    setLoginOpen,
+    login,
+    loading,
+    openExternal,
+    connectionError,
+    clearConnectionError,
+  } = useApp();
   const [token, setToken] = useState('');
   const [closing, setClosing] = useState(false);
 
@@ -19,11 +27,11 @@ export const LoginModal: React.FC = () => {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [loading, close]);
+  }, [loading]);
 
   return (
     <div
-      className="modal-overlay fixed inset-0 backdrop-blur-sm grid place-items-center z-50 p-3 sm:p-5"
+      className="modal-overlay fixed inset-0 backdrop-blur-sm grid place-items-center z-[90] p-3 sm:p-5"
       data-closing={closing}
       role="presentation"
       onMouseDown={(event) => event.target === event.currentTarget && close()}
@@ -46,10 +54,23 @@ export const LoginModal: React.FC = () => {
         <div className="w-14 h-14 rounded-2xl bg-[#261732] grid place-items-center mb-6">
           <Github size={28} className="text-[#E7E0D6]" />
         </div>
-        <h2 id="login-title" className="text-2xl font-bold tracking-tight mb-2">Подключите GitHub</h2>
+        <h2 id="login-title" className="text-2xl font-bold tracking-tight mb-2">Подключение к GitHub</h2>
         <p className="text-sm text-[#7D7482] leading-relaxed mb-6">
-          Введите Personal Access Token для доступа к репозиториям, коммитам и веткам.
+          Вставьте Personal Access Token, чтобы получить доступ к репозиториям, коммитам и веткам.
         </p>
+
+        {connectionError && (
+          <div className="mb-5">
+            <ConnectionErrorPanel
+              error={connectionError}
+              compact
+              onAction={() => {
+                clearConnectionError();
+                document.getElementById('github-token')?.focus();
+              }}
+            />
+          </div>
+        )}
 
         <form onSubmit={(event) => {
           event.preventDefault();
@@ -58,9 +79,10 @@ export const LoginModal: React.FC = () => {
           <label className="block text-xs font-bold mb-2">
             <span className="flex items-center gap-2 mb-2">
               <Key size={14} />
-              GitHub Personal Access Token
+              Personal Access Token
             </span>
             <input
+              id="github-token"
               autoFocus
               type="password"
               autoComplete="off"
@@ -80,14 +102,14 @@ export const LoginModal: React.FC = () => {
                 className="mt-1 text-[#261732] font-semibold underline"
                 onClick={() => void openExternal('https://github.com/settings/tokens')}
               >
-                GitHub Settings → Tokens
+                Как создать Personal Access Token?
                 <ExternalLink size={10} className="inline ml-1" />
               </button>
             </div>
           </div>
 
-          <p className="mt-3 text-xs text-[#7D7482]">
-            Нужны права: <code className="bg-[#F3EFE9] px-1.5 py-0.5 rounded text-[10px]">repo</code>, <code className="bg-[#F3EFE9] px-1.5 py-0.5 rounded text-[10px]">read:user</code>, <code className="bg-[#F3EFE9] px-1.5 py-0.5 rounded text-[10px]">delete_repo</code>
+          <p className="mt-3 text-xs leading-relaxed text-[#7D7482]">
+            Fine-grained PAT: <code className="bg-[#F3EFE9] px-1.5 py-0.5 rounded text-xs">Metadata: read</code>, <code className="bg-[#F3EFE9] px-1.5 py-0.5 rounded text-xs">Contents: read/write</code>, <code className="bg-[#F3EFE9] px-1.5 py-0.5 rounded text-xs">Issues: read/write</code>, <code className="bg-[#F3EFE9] px-1.5 py-0.5 rounded text-xs">Pull requests: read/write</code>. Classic PAT: <code className="bg-[#F3EFE9] px-1.5 py-0.5 rounded text-xs">repo</code> + <code className="bg-[#F3EFE9] px-1.5 py-0.5 rounded text-xs">read:user</code>.
           </p>
 
           <div className="flex flex-col-reverse sm:flex-row gap-3 mt-6">
@@ -104,7 +126,7 @@ export const LoginModal: React.FC = () => {
               disabled={!token.trim() || loading}
               className="flex-1 h-11 bg-[#261732] text-[#E7E0D6] rounded-lg text-sm font-semibold flex items-center justify-center gap-2 disabled:opacity-40"
             >
-              {loading ? 'Проверка…' : <>Подключить <ArrowRight size={16} /></>}
+              {loading ? 'Проверка…' : <>Подключиться <ArrowRight size={16} /></>}
             </button>
           </div>
         </form>

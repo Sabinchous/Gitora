@@ -1,0 +1,52 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]: gitora
+    - button "Не подключён Нажмите для входа" [ref=e15]:
+      - generic [ref=e20]:
+        - generic [ref=e21]: Не подключён
+        - generic [ref=e22]: Нажмите для входа
+    - generic [ref=e25]: ПРОЕКТЫ
+    - generic [ref=e27]:
+      - generic [ref=e28]:
+        - generic [ref=e32]: Поиск репозиториев
+        - textbox "Поиск репозиториев" [ref=e33]
+      - generic [ref=e34]:
+        - generic [ref=e35]: Сортировка репозиториев
+        - combobox "Сортировка репозиториев" [ref=e37]:
+          - generic [ref=e38]: Недавно обновлённые
+    - generic [ref=e40]:
+      - paragraph [ref=e41]: Репозитории не найдены
+      - paragraph [ref=e42]: Измените фильтр, чтобы увидеть другие проекты.
+    - generic [ref=e43]:
+      - button "Настройки" [ref=e44]
+      - button "Служебные действия Gitora" [ref=e49]
+  - main [ref=e54]:
+    - generic [ref=e55]:
+      - generic [ref=e56]: Проекты
+      - button "Подключиться с PAT" [ref=e58]: "??"
+    - generic [ref=e60]:
+      - heading "Gitora" [level=1] [ref=e66]
+      - paragraph [ref=e67]: Визуальный граф истории Git-репозиториев. Подключитесь с Personal Access Token, чтобы видеть коммиты, ветки и слияния в одном месте.
+      - button "Подключиться с PAT" [ref=e68]
+  - dialog [ref=e69]:
+    - button "Закрыть" [ref=e70]
+    - heading "Подключение к GitHub" [level=2] [ref=e78]
+    - paragraph [ref=e79]: Вставьте Personal Access Token, чтобы получить доступ к репозиториям, коммитам и веткам.
+    - generic [ref=e80]:
+      - generic [ref=e81]:
+        - generic [ref=e82]: Personal Access Token
+        - textbox "Personal Access Token" [active] [ref=e87]:
+          - /placeholder: github_pat_…
+      - generic [ref=e91]:
+        - paragraph [ref=e92]: Токен шифруется системным хранилищем Windows и не доступен интерфейсу после входа.
+        - button "Как создать Personal Access Token?" [ref=e93]
+      - paragraph [ref=e98]:
+        - text: "Нужны права:"
+        - code [ref=e99]: repo
+        - text: ","
+        - code [ref=e100]: read:user
+        - text: ","
+        - code [ref=e101]: delete_repo
+      - generic [ref=e102]:
+        - button "Отмена" [ref=e103]
+        - button "Подключиться" [disabled] [ref=e104]

@@ -61,7 +61,7 @@ export const IssueDetail: React.FC = () => {
             {selectedIssue.labels.map((label) => (
               <span
                 key={label.name}
-                className="px-2 py-1 rounded text-[10px] font-medium"
+                className="px-2 py-1 rounded text-xs font-medium"
                 style={{
                   backgroundColor: `#${label.color}`,
                   color: readableTextColor(label.color),
@@ -75,7 +75,7 @@ export const IssueDetail: React.FC = () => {
 
         {selectedIssue.assignees.length > 0 && (
           <div className="mb-4">
-            <span className="text-[10px] font-bold text-[#7D7482] mb-2 block">НАЗНАЧЕНО</span>
+            <span className="text-xs font-bold text-[#7D7482] mb-2 block">НАЗНАЧЕНО</span>
             <div className="flex flex-wrap gap-2">
               {selectedIssue.assignees.map((assignee) => (
                 <div key={assignee.login} className="flex items-center gap-1.5 px-2 py-1 bg-[#F3EFE9] rounded text-xs">

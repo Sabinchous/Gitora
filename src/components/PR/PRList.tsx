@@ -43,7 +43,7 @@ export const PRList: React.FC<PRListProps> = ({ owner, repo }) => {
           ))}
         </div>
         <button
-          className="h-[34px] bg-[#261732] text-[#E7E0D6] rounded-lg flex items-center gap-2 px-3 text-[11px] font-semibold"
+          className="h-[34px] bg-[#261732] text-[#E7E0D6] rounded-lg flex items-center gap-2 px-3 text-xs font-semibold"
           onClick={() => setPrOpen(true)}
         >
           <Plus size={16} />
@@ -74,9 +74,9 @@ export const PRList: React.FC<PRListProps> = ({ owner, repo }) => {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-semibold truncate">{pr.title}</span>
-                      <span className="text-[10px] text-[#7D7482]">#{pr.number}</span>
+                      <span className="text-xs text-[#7D7482]">#{pr.number}</span>
                     </div>
-                    <div className="flex items-center gap-2 mt-1 text-[10px] text-[#7D7482]">
+                    <div className="flex items-center gap-2 mt-1 text-xs text-[#7D7482]">
                       <span className="flex items-center gap-1">
                         <User size={12} />
                         {pr.user?.login || 'Неизвестный'}
@@ -86,7 +86,7 @@ export const PRList: React.FC<PRListProps> = ({ owner, repo }) => {
                       <span>•</span>
                       <span>{new Date(pr.created_at).toLocaleDateString('ru-RU')}</span>
                     </div>
-                    <div className="flex items-center gap-2 mt-1.5 text-[10px]">
+                    <div className="flex items-center gap-2 mt-1.5 text-xs">
                       <span className="px-1.5 py-0.5 bg-[rgba(93,118,89,.1)] text-[#5D7659] rounded">{pr.head.ref}</span>
                       <span className="text-[#7D7482]">→</span>
                       <span className="px-1.5 py-0.5 bg-[rgba(38,23,50,.08)] text-[#261732] rounded">{pr.base.ref}</span>

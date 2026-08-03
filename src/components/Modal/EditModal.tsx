@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Check, Pencil, X } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { MarkdownEditor } from '../common/MarkdownEditor';
 
 interface EditModalProps {
   repoFullName: string;
@@ -74,7 +75,7 @@ export const EditModal: React.FC<EditModalProps> = ({
           <Pencil size={25} />
         </div>
         <h2 id="edit-title" className="text-[23px] font-semibold mt-4 mb-1">Редактировать репозиторий</h2>
-        <p className="text-[11px] text-[#7D7482] leading-relaxed mb-5">
+        <p className="text-xs text-[#7D7482] leading-relaxed mb-5">
           Измените настройки репозитория <b className="text-[#261732]">{repoFullName}</b>
         </p>
 
@@ -93,12 +94,12 @@ export const EditModal: React.FC<EditModalProps> = ({
 
           <label className="block text-xs font-bold mt-4">
             Описание
-            <textarea
+            <MarkdownEditor
               value={description}
-              onChange={(event) => setDescription(event.target.value)}
+              onValueChange={setDescription}
               maxLength={350}
               rows={3}
-              className="block w-full resize-none border border-[rgba(38,23,50,.12)] bg-[#F3EFE9] rounded-lg p-3 text-sm mt-2"
+              placeholder="Описание проекта…"
             />
           </label>
 

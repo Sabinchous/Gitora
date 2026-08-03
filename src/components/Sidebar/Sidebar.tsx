@@ -1,6 +1,7 @@
 import React from 'react';
 import { ChevronDown, Download, GitBranch, Github, LogOut, Plus, Settings, X } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { MoreMenu } from '../common/MoreMenu';
 import { ProjectList } from './ProjectList';
 
 export const Sidebar: React.FC = () => {
@@ -50,66 +51,53 @@ export const Sidebar: React.FC = () => {
             </span>
           )}
           <span className="flex-1 min-w-0">
-            <b className="block text-xs truncate">{userName}</b>
-            <small className="block text-[9px] text-[rgba(231,224,214,.5)] mt-0.5 truncate">{userLogin}</small>
+            <b className="block text-sm truncate">{userName}</b>
+            <small className="block text-xs text-[rgba(231,224,214,.5)] mt-0.5 truncate">{userLogin}</small>
           </span>
           {!connected && <ChevronDown size={16} />}
         </button>
       </div>
 
-      <div className="flex items-center justify-between text-[9px] font-extrabold tracking-[1.5px] text-[rgba(231,224,214,.45)] mt-5 px-4 pb-2">
+      <div className="flex items-center justify-between text-xs font-extrabold tracking-[1.5px] text-[rgba(231,224,214,.45)] mt-5 px-4 pb-2">
         <span>ПРОЕКТЫ</span>
-        {connected && (
-          <button aria-label="Создать репозиторий" onClick={() => setCreateOpen(true)}>
-            <Plus size={15} className="text-[#AEA989]" />
-          </button>
-        )}
       </div>
 
       <ProjectList />
 
       {connected && (
         <button
-          className="mx-4 mt-4 mb-3 border border-dashed border-[rgba(231,224,214,.18)] rounded-lg h-10 flex items-center justify-center gap-2 text-[11px] text-[rgba(231,224,214,.72)] hover:text-[#E7E0D6] hover:bg-[rgba(231,224,214,.06)]"
+          type="button"
+          className="mx-4 mb-3 flex min-h-10 items-center justify-center gap-2 rounded-lg border border-dashed border-[rgba(231,224,214,.18)] px-3 text-sm font-semibold text-[rgba(231,224,214,.72)] transition-colors hover:bg-[rgba(231,224,214,.06)] hover:text-[#E7E0D6]"
+          aria-label="Добавить репозиторий"
           onClick={() => setCreateOpen(true)}
+          data-sidebar-add-repository
         >
-          <Plus size={16} />
+          <Plus size={15} />
           Новый репозиторий
         </button>
       )}
 
-      <div className="mt-auto p-3 border-t border-[rgba(231,224,214,.09)]">
+      <div className="mt-auto flex items-center gap-1 border-t border-[rgba(231,224,214,.09)] p-3">
         <button
-          className="w-full flex items-center gap-2 text-left text-xs text-[rgba(231,224,214,.62)] py-2 hover:text-[#E7E0D6]"
+          className="min-h-10 flex-1 flex items-center gap-2 rounded-lg px-2 text-left text-sm text-[rgba(231,224,214,.72)] hover:bg-[rgba(231,224,214,.08)] hover:text-[#E7E0D6]"
           onClick={() => setSettingsOpen(true)}
         >
           <Settings size={16} />
           Настройки
         </button>
-        <button
-          className="w-full flex items-center gap-2 text-left text-xs text-[rgba(231,224,214,.62)] py-2 hover:text-[#E7E0D6]"
-          onClick={() => setUpdatesOpen(true)}
-        >
-          <Download size={16} />
-          Обновления
-        </button>
-        {connected ? (
-          <button
-            className="w-full flex items-center gap-2 text-left text-xs text-[rgba(231,224,214,.62)] py-2 hover:text-[#E7E0D6]"
-            onClick={() => void logout()}
-          >
-            <LogOut size={16} />
-            Отключить GitHub
-          </button>
-        ) : (
-          <button
-            className="w-full flex items-center gap-2 text-left text-xs text-[rgba(231,224,214,.62)] py-2 hover:text-[#E7E0D6]"
-            onClick={() => setLoginOpen(true)}
-          >
-            <Github size={16} />
-            Подключить GitHub
-          </button>
-        )}
+        <MoreMenu
+          label="Служебные действия Gitora"
+          variant="sidebar"
+          placement="top"
+          triggerTestId="data-sidebar-more-trigger"
+          menuTestId="data-sidebar-more-menu"
+          items={[
+            { id: 'updates', label: 'Обновления', icon: Download, onSelect: () => setUpdatesOpen(true) },
+            connected
+              ? { id: 'logout', label: 'Отключить GitHub', icon: LogOut, onSelect: () => void logout() }
+              : { id: 'login', label: 'Подключиться с PAT', icon: Github, onSelect: () => setLoginOpen(true) },
+          ]}
+        />
       </div>
     </aside>
   );

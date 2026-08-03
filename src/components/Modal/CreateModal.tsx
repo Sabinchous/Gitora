@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Check, FolderGit2, FolderOpen, Github, Trash2, X } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { UploadFolderSummary } from '../../types';
+import { MarkdownEditor } from '../common/MarkdownEditor';
 
 export const CreateModal: React.FC = () => {
   const { setCreateOpen, createRepo, loading, selectUploadFolder, clearUploadFolder } = useApp();
@@ -56,7 +57,7 @@ export const CreateModal: React.FC = () => {
           <FolderGit2 size={25} />
         </div>
         <h2 id="create-title" className="text-[23px] font-semibold mt-4 mb-1">Новый репозиторий</h2>
-        <p className="text-[11px] text-[#7D7482] leading-relaxed mb-5">Репозиторий будет создан в вашем аккаунте GitHub.</p>
+        <p className="text-xs text-[#7D7482] leading-relaxed mb-5">Репозиторий будет создан в вашем аккаунте GitHub.</p>
 
         <form onSubmit={async (event) => {
           event.preventDefault();
@@ -77,18 +78,18 @@ export const CreateModal: React.FC = () => {
 
           <label className="block text-xs font-bold mt-4">
             Описание
-            <textarea
+            <MarkdownEditor
               value={description}
-              onChange={(event) => setDescription(event.target.value)}
+              onValueChange={setDescription}
               maxLength={350}
               rows={3}
-              className="block w-full resize-none border border-[rgba(38,23,50,.12)] bg-[#F3EFE9] rounded-lg p-3 text-sm mt-2"
+              placeholder="Коротко опишите проект…"
             />
           </label>
 
           <div className="mt-4">
             <span className="text-xs font-bold">Папка проекта</span>
-            <span className="text-[10px] text-[#7D7482] ml-1">(необязательно)</span>
+            <span className="text-xs text-[#7D7482] ml-1">(необязательно)</span>
             <div className="flex gap-2 mt-2">
               <button
                 type="button"
@@ -114,7 +115,7 @@ export const CreateModal: React.FC = () => {
               )}
             </div>
             {folderSummary && (
-              <div className="mt-2 p-2 bg-[#F3EFE9] rounded-lg text-[10px] text-[#7D7482]">
+              <div className="mt-2 p-2 bg-[#F3EFE9] rounded-lg text-xs text-[#7D7482]">
                 <div className="flex justify-between">
                   <span>Файлов: <b className="text-[#261732]">{folderSummary.fileCount}</b></span>
                   <span>Размер: <b className="text-[#261732]">{formatBytes(folderSummary.totalBytes)}</b></span>

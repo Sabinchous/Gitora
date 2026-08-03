@@ -7,10 +7,10 @@ $tempOutput = Join-Path $tempRoot ("gitora-electron-build-" + [guid]::NewGuid().
 
 Push-Location $root
 try {
-  & npm run build
+  & npm.cmd run build
   if ($LASTEXITCODE -ne 0) { throw 'Vite build failed' }
 
-  & npx electron-builder "--config.directories.output=$tempOutput"
+  & npx.cmd electron-builder "--config.directories.output=$tempOutput"
   if ($LASTEXITCODE -ne 0) { throw 'Electron build failed' }
 
   New-Item -ItemType Directory -Force -Path $output | Out-Null
