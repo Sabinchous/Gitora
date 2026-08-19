@@ -109,7 +109,7 @@ Gitora поддерживает светлую и тёмную тему.
 
 ## Скриншоты
 
-![Gitora в светлой теме]([docs/screenshots/gitora-light-theme.png](https://github.com/user-attachments/assets/e022fa35-ab11-4bfb-8be3-d165ebd130)
+![Gitora в светлой теме](https://github.com/user-attachments/assets/e022fa35-ab11-4bfb-8be3-d165ebd130)
 
 ![Gitora в тёмной теме](https://github.com/user-attachments/assets/87f7ed19-5f6f-4086-bc77-31309bc071d1)
 
