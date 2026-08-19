@@ -111,7 +111,7 @@ Gitora поддерживает светлую и тёмную тему.
 
 ![Gitora в светлой теме](docs/screenshots/gitora-light-theme.png)
 
-![Gitora в тёмной теме](<img width="2553" height="1396" alt="image" src="https://github.com/user-attachments/assets/87f7ed19-5f6f-4086-bc77-31309bc071d1" />)
+![Gitora в тёмной теме](https://github.com/user-attachments/assets/87f7ed19-5f6f-4086-bc77-31309bc071d1)
 
 ## MCP-сервер (для ИИ-агентов)
 
