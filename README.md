@@ -39,17 +39,17 @@
 
 ## Установка
 
-1. Скачайте `Gitora Setup 0.2.exe` из [GitHub Releases](https://github.com/Appappars/Gitora/releases/tag/v0.2) или из папки `outputs/release/` после сборки.
+1. Скачайте `Gitora Setup 0.2.2.exe` из [GitHub Releases](https://github.com/Appappars/Gitora/releases/tag/v0.2.2) или из папки `outputs/release/` после сборки.
 2. Запустите installer и выберите папку установки.
 3. Откройте Gitora и нажмите **Подключиться с PAT**.
 
-Поддерживаемая версия: **Gitora 0.2** для Windows. Portable-версия в текущей конфигурации не выпускается.
+Поддерживаемая версия: **Gitora 0.2.2** для Windows. Portable-версия в текущей конфигурации не выпускается.
 
 ## Быстрый старт
 
 ### 1. Скачать приложение
 
-Скачайте `Gitora Setup 0.2.exe` из папки `outputs/release/` или загрузите с [GitHub Releases](https://github.com/Appappars/Gitora/releases/tag/v0.2).
+Скачайте `Gitora Setup 0.2.2.exe` из папки `outputs/release/` или загрузите с [GitHub Releases](https://github.com/Appappars/Gitora/releases/tag/v0.2.2).
 
 Запустите установщик и следуйте инструкциям.
 
@@ -109,9 +109,9 @@ Gitora поддерживает светлую и тёмную тему.
 
 ## Скриншоты
 
-![Gitora в светлой теме](https://github.com/user-attachments/assets/9f94f340-363f-479b-baa2-e85f984757f6)
+![Gitora в светлой теме](docs/screenshots/gitora-light-theme.png)
 
-![Gitora в тёмной теме](https://github.com/user-attachments/assets/87f7ed19-5f6f-4086-bc77-31309bc071d1)
+![Gitora в тёмной теме](docs/screenshots/gitora-dark-theme.png)
 
 ## MCP-сервер (для ИИ-агентов)
 
@@ -179,7 +179,7 @@ npm run build
 npm run electron:build
 ```
 
-Сборка создаёт installer `outputs/release/Gitora Setup 0.2.exe`. Настройка имени находится в `electron-builder.json`.
+Сборка создаёт installer `outputs/release/Gitora Setup 0.2.2.exe`. Настройка имени находится в `electron-builder.json`.
 
 ## Структура проекта
 
@@ -207,9 +207,9 @@ gitora/
 
 ## Версия
 
-Current version: **0.2**
+Current version: **0.2.2**
 
-Релиз: [v0.2](https://github.com/Appappars/Gitora/releases/tag/v0.2)
+Релиз: [v0.2.2](https://github.com/Appappars/Gitora/releases/tag/v0.2.2)
 
 ## Лицензия
 

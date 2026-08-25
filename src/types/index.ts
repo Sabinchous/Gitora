@@ -66,8 +66,86 @@ export interface Branch {
 
 export interface GitHubUser {
   login: string;
-  name: string;
+  name: string | null;
   avatar_url: string;
+  html_url?: string;
+  type?: 'User' | 'Organization' | string;
+}
+
+export type GitHubCollaboratorPermission = 'pull' | 'triage' | 'push' | 'maintain' | 'admin';
+export type GitHubTeamRole = 'Read' | 'Triage' | 'Write' | 'Maintain' | 'Admin';
+export type TeamLoadState = 'idle' | 'loading' | 'loaded' | 'empty' | 'forbidden' | 'error' | 'pending';
+
+export interface GitHubRepositoryPermissions {
+  pull?: boolean;
+  triage?: boolean;
+  push?: boolean;
+  maintain?: boolean;
+  admin?: boolean;
+}
+
+export interface GitHubCollaborator {
+  login: string;
+  name?: string | null;
+  avatar_url?: string;
+  html_url?: string;
+  role_name?: string;
+  permissions?: GitHubRepositoryPermissions;
+}
+
+export interface GitHubInvitation {
+  id: number;
+  invitee?: {
+    login?: string;
+    name?: string | null;
+    avatar_url?: string;
+    html_url?: string;
+  } | null;
+  inviter?: {
+    login?: string;
+    name?: string | null;
+    avatar_url?: string;
+    html_url?: string;
+  } | null;
+  permissions?: GitHubCollaboratorPermission;
+  created_at?: string;
+  expired?: boolean;
+  html_url?: string;
+}
+
+export interface GitHubContributor {
+  login?: string | null;
+  name?: string | null;
+  email?: string | null;
+  avatar_url?: string;
+  html_url?: string;
+  contributions: number;
+  anonymous?: boolean;
+}
+
+export interface GitHubContributorStatistics {
+  author?: {
+    login?: string;
+    name?: string | null;
+    avatar_url?: string;
+    html_url?: string;
+  } | null;
+  total: number;
+  weeks: {
+    w: number;
+    a: number;
+    d: number;
+    c: number;
+  }[];
+}
+
+export interface GitHubTeamList<T> {
+  state: TeamLoadState;
+  items: T[];
+}
+
+export interface GitHubTeamMutation {
+  status: 201 | 204;
 }
 
 export interface GitHubRepo {
@@ -80,6 +158,16 @@ export interface GitHubRepo {
   forks_count: number;
   updated_at: string;
   default_branch: string;
+  html_url?: string;
+  archived?: boolean;
+  disabled?: boolean;
+  owner?: {
+    login: string;
+    type?: 'User' | 'Organization' | string;
+    avatar_url?: string;
+    html_url?: string;
+  };
+  permissions?: GitHubRepositoryPermissions;
 }
 
 export interface GitHubCommit {
@@ -140,6 +228,42 @@ export interface GitHubPR {
   created_at: string;
   updated_at: string;
   html_url: string;
+  draft?: boolean;
+  mergeable?: boolean | null;
+  mergeable_state?: 'unknown' | 'clean' | 'dirty' | 'blocked' | 'behind' | 'unstable' | 'draft' | string;
+  additions?: number;
+  deletions?: number;
+  changed_files?: number;
+  commits?: number;
+}
+
+export interface GitHubPRFile {
+  sha: string;
+  filename: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  changes: number;
+  patch?: string;
+  previous_filename?: string;
+}
+
+export interface GitHubPRReview {
+  id: number;
+  user?: {
+    login: string;
+    avatar_url?: string;
+  } | null;
+  body?: string | null;
+  state: string;
+  submitted_at?: string | null;
+  html_url?: string;
+}
+
+export interface GitHubPRMergeResult {
+  sha?: string;
+  merged: boolean;
+  message: string;
 }
 
 export interface GitHubIssue {
@@ -180,6 +304,7 @@ export interface RepositoryData {
   branches: GitHubBranch[];
   empty?: boolean;
   defaultBranch?: string;
+  repository?: GitHubRepo;
 }
 
 export interface ReleaseAsset {
@@ -246,6 +371,7 @@ export interface GitFolderChangesSummary extends FolderChangesSummary {
 
 export type AiClientId = 'codex' | 'chatgpt' | 'claude' | 'cursor' | 'other' | 'manual';
 export type AiConnectionLevel = 'ready' | 'attention' | 'error' | 'not_configured';
+export type McpWriteDuration = '10m' | '30m' | '1h' | 'forever';
 
 export interface AiToolStatus {
   name: string;
@@ -337,6 +463,7 @@ export interface AiConnectionStatus {
   mcpClient: McpClientDiagnostics;
   mcpWritesAllowed: boolean;
   mcpWritesExpiresAt?: string;
+  mcpWritesDuration?: McpWriteDuration;
   mcpRunning: boolean;
   mcpServerPath: string;
   mcpMetadataPath: string;
@@ -370,6 +497,7 @@ export interface AiClientSetupResult {
 export interface McpWriteStatus {
   mcpWritesAllowed: boolean;
   mcpWritesExpiresAt?: string;
+  mcpWritesDuration?: McpWriteDuration;
 }
 
 export interface UploadFolderSummary {
@@ -377,6 +505,12 @@ export interface UploadFolderSummary {
   fileCount: number;
   totalBytes: number;
   warnings: string[];
+}
+
+export interface CreateRepositoryOptions {
+  autoInit?: boolean;
+  gitignoreTemplate?: string;
+  licenseTemplate?: string;
 }
 
 export interface CreateRepositoryResult {
@@ -400,11 +534,22 @@ export interface ElectronAPI {
     getLatestCommit: (owner: string, repo: string) => Promise<GitHubApiResult<GitHubCommit | null>>;
     getCommitDetail: (owner: string, repo: string, sha: string) => Promise<GitHubApiResult<GitHubCommit>>;
     getRepository: (owner: string, repo: string, commitLimit?: number) => Promise<GitHubApiResult<RepositoryData>>;
+    getCollaborators: (owner: string, repo: string) => Promise<GitHubApiResult<GitHubTeamList<GitHubCollaborator>>>;
+    getInvitations: (owner: string, repo: string) => Promise<GitHubApiResult<GitHubTeamList<GitHubInvitation>>>;
+    getContributors: (owner: string, repo: string) => Promise<GitHubApiResult<GitHubTeamList<GitHubContributor>>>;
+    getContributorStats: (owner: string, repo: string) => Promise<GitHubApiResult<GitHubTeamList<GitHubContributorStatistics>>>;
+    getContributorTimeline: (owner: string, repo: string, login: string) => Promise<GitHubApiResult<GitHubTeamList<GitHubCommit>>>;
+    getUserProfile: (login: string) => Promise<GitHubApiResult<GitHubUser>>;
+    addCollaborator: (owner: string, repo: string, login: string, permission: GitHubCollaboratorPermission) => Promise<GitHubApiResult<GitHubTeamMutation>>;
+    updateCollaborator: (owner: string, repo: string, login: string, permission: GitHubCollaboratorPermission) => Promise<GitHubApiResult<GitHubTeamMutation>>;
+    removeCollaborator: (owner: string, repo: string, login: string) => Promise<GitHubApiResult<GitHubTeamMutation>>;
+    cancelInvitation: (owner: string, repo: string, invitationId: number) => Promise<GitHubApiResult<GitHubTeamMutation>>;
     createRepo: (
       name: string,
       description: string,
       isPrivate: boolean,
       folderPath?: string,
+      options?: CreateRepositoryOptions,
     ) => Promise<GitHubApiResult<CreateRepositoryResult>>;
     deleteRepo: (owner: string, repo: string) => Promise<GitHubApiResult<null>>;
     updateRepo: (owner: string, repo: string, data: { name?: string; description?: string; private?: boolean }) => Promise<GitHubApiResult<GitHubRepo>>;
@@ -413,6 +558,10 @@ export interface ElectronAPI {
     renameBranch: (owner: string, repo: string, branch: string, newName: string) => Promise<GitHubApiResult<GitHubBranch>>;
     getPullRequests: (owner: string, repo: string, state?: 'open' | 'closed' | 'all') => Promise<GitHubApiResult<GitHubPR[]>>;
     getPullRequest: (owner: string, repo: string, number: number) => Promise<GitHubApiResult<GitHubPR>>;
+    getPullRequestFiles: (owner: string, repo: string, number: number) => Promise<GitHubApiResult<GitHubPRFile[]>>;
+    approvePullRequest: (owner: string, repo: string, number: number) => Promise<GitHubApiResult<GitHubPRReview>>;
+    mergePullRequest: (owner: string, repo: string, number: number, sha?: string) => Promise<GitHubApiResult<GitHubPRMergeResult>>;
+    updatePullRequestState: (owner: string, repo: string, number: number, state: 'open' | 'closed') => Promise<GitHubApiResult<GitHubPR>>;
     createPullRequest: (owner: string, repo: string, title: string, body: string, head: string, base: string) => Promise<GitHubApiResult<GitHubPR>>;
     getIssues: (owner: string, repo: string, state?: 'open' | 'closed' | 'all') => Promise<GitHubApiResult<GitHubIssue[]>>;
     getIssue: (owner: string, repo: string, number: number) => Promise<GitHubApiResult<GitHubIssue>>;
@@ -441,7 +590,7 @@ export interface ElectronAPI {
     configureAiClient: (client: AiClientId) => Promise<GitHubApiResult<AiClientSetupResult>>;
     disconnectAiClient: (client: AiClientId) => Promise<GitHubApiResult<AiClientStatus>>;
     restartMcp: () => Promise<GitHubApiResult<AiConnectionStatus>>;
-    allowMcpWrites: () => Promise<GitHubApiResult<McpWriteStatus>>;
+    allowMcpWrites: (options: { duration: McpWriteDuration }) => Promise<GitHubApiResult<McpWriteStatus>>;
     revokeMcpWrites: () => Promise<GitHubApiResult<McpWriteStatus>>;
     openAiConfigFolder: (client: AiClientId) => Promise<GitHubApiResult<null>>;
   };

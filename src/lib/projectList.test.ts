@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   filterAndSortProjects,
+  normalizeProjectImage,
+  normalizeProjectIcon,
   PROJECT_LIST_SETTINGS_KEY,
   readProjectListPreferences,
+  reorderProjectIds,
   saveProjectListPreferences,
   StorageLike,
 } from './projectList';
@@ -62,6 +65,21 @@ describe('project list helpers', () => {
     expect(result.map(project => project.name)).toEqual(['Gamma', 'Alpha', 'Beta']);
   });
 
+  it('keeps the custom order when filtering and appends new projects after ordered ones', () => {
+    expect(filterAndSortProjects(projects, 'a', 'custom', [], ['3', '1', '2']).map(project => project.name))
+      .toEqual(['Gamma', 'Alpha', 'Beta']);
+    expect(filterAndSortProjects(projects, '', 'custom', [], ['3', '1']).map(project => project.name))
+      .toEqual(['Gamma', 'Alpha', 'Beta']);
+  });
+
+  it('moves a project before the dragged-to project without mutating the source order', () => {
+    const projectIds = ['1', '2', '3'];
+
+    expect(reorderProjectIds(projectIds, '3', '1')).toEqual(['3', '1', '2']);
+    expect(reorderProjectIds(projectIds, '2', 'missing')).toEqual(projectIds);
+    expect(projectIds).toEqual(['1', '2', '3']);
+  });
+
   it('filters private and public repositories', () => {
     expect(filterAndSortProjects(projects, '', 'private', []).map(project => project.name)).toEqual(['Beta']);
     expect(filterAndSortProjects(projects, '', 'public', []).map(project => project.name))
@@ -70,12 +88,47 @@ describe('project list helpers', () => {
 
   it('round-trips preferences and falls back for invalid persisted data', () => {
     const storage = memoryStorage();
-    saveProjectListPreferences({ sortMode: 'favorites', favoriteIds: ['2'] }, storage);
+    saveProjectListPreferences({
+      sortMode: 'favorites',
+      favoriteIds: ['2'],
+      orderIds: ['3', '2', '1'],
+      iconByProjectId: { '2': '🚀' },
+      imageByProjectId: { '1': 'data:image/png;base64,AA==' },
+      seenCommitByProjectId: { '1': 'a'.repeat(40) },
+    }, storage);
 
     expect(storage.getItem(PROJECT_LIST_SETTINGS_KEY)).toContain('favorites');
-    expect(readProjectListPreferences(storage)).toEqual({ sortMode: 'favorites', favoriteIds: ['2'] });
+    expect(readProjectListPreferences(storage)).toEqual({
+      sortMode: 'favorites',
+      favoriteIds: ['2'],
+      orderIds: ['3', '2', '1'],
+      iconByProjectId: { '2': '🚀' },
+      imageByProjectId: { '1': 'data:image/png;base64,AA==' },
+      seenCommitByProjectId: { '1': 'a'.repeat(40) },
+    });
 
-    const invalidStorage = memoryStorage('{"sortMode":"invalid","favoriteIds":["2",4]}');
-    expect(readProjectListPreferences(invalidStorage)).toEqual({ sortMode: 'updated', favoriteIds: ['2'] });
+    const invalidStorage = memoryStorage('{"sortMode":"invalid","favoriteIds":["2",4],"orderIds":["3",5],"iconByProjectId":{"2":"  🎨 ","3":4,"4":""},"imageByProjectId":{"2":"data:image/webp;base64,AA==","3":"https://example.com/image.png","4":4},"seenCommitByProjectId":{"2":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","3":"not-a-sha"}}');
+    expect(readProjectListPreferences(invalidStorage)).toEqual({
+      sortMode: 'updated',
+      favoriteIds: ['2'],
+      orderIds: ['3'],
+      iconByProjectId: { '2': '🎨' },
+      imageByProjectId: { '2': 'data:image/webp;base64,AA==' },
+      seenCommitByProjectId: { '2': 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' },
+    });
+  });
+
+  it('normalizes custom project icons without storing empty or oversized values', () => {
+    expect(normalizeProjectIcon('  🚀  ')).toBe('🚀');
+    expect(normalizeProjectIcon('')).toBeNull();
+    expect(normalizeProjectIcon('123456789')).toBe('12345678');
+    expect(normalizeProjectIcon(42)).toBeNull();
+  });
+
+  it('accepts only compact local image data URLs', () => {
+    expect(normalizeProjectImage(' data:image/png;base64,AA== ')).toBe('data:image/png;base64,AA==');
+    expect(normalizeProjectImage('https://example.com/project.png')).toBeNull();
+    expect(normalizeProjectImage('data:text/plain;base64,AA==')).toBeNull();
+    expect(normalizeProjectImage(42)).toBeNull();
   });
 });

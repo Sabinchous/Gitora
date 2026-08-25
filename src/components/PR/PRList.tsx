@@ -9,12 +9,21 @@ interface PRListProps {
 }
 
 export const PRList: React.FC<PRListProps> = ({ owner, repo }) => {
-  const { pullRequests, loadPullRequests, setSelectedPR, setPrOpen, loading } = useApp();
+  const {
+    pullRequests,
+    pullRequestsLoading,
+    pullRequestsError,
+    loadPullRequests,
+    setSelectedPR,
+    setPrOpen,
+  } = useApp();
   const [filter, setFilter] = useState<'open' | 'closed' | 'all'>('open');
 
   useEffect(() => {
-    void loadPullRequests(owner, repo, filter);
-  }, [owner, repo, filter]);
+    void loadPullRequests(owner, repo, 'all');
+  }, [owner, repo]);
+
+  const visiblePullRequests = pullRequests.filter(pr => filter === 'all' || pr.state === filter);
 
   const getStatusColor = (pr: GitHubPR) => {
     if (pr.merged) return 'bg-[#8E7CA3]';
@@ -51,23 +60,56 @@ export const PRList: React.FC<PRListProps> = ({ owner, repo }) => {
         </button>
       </div>
 
-      <div className="flex-1 overflow-auto">
-        {loading ? (
+      <div className="flex-1 overflow-auto" data-pr-list>
+        {pullRequestsLoading ? (
           <div className="flex items-center justify-center py-12">
             <div className="w-5 h-5 border-2 border-[#AEA989] border-t-transparent rounded-full animate-spin" />
           </div>
-        ) : pullRequests.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-12 text-center">
-            <GitPullRequest size={40} className="text-[#7D7482] mb-4" />
-            <p className="text-sm text-[#7D7482]">Нет pull requests</p>
+        ) : pullRequestsError ? (
+          <div className="flex flex-col items-center justify-center gap-3 px-6 py-12 text-center" data-pr-error>
+            <GitPullRequest size={40} className="text-[#A16C62]" />
+            <div>
+              <p className="text-sm font-semibold">Не удалось загрузить pull requests</p>
+              <p className="mt-1 text-xs leading-relaxed text-[#7D7482]">{pullRequestsError}</p>
+            </div>
+            <button
+              type="button"
+              className="rounded-lg border border-[rgba(38,23,50,.12)] px-3 py-1.5 text-xs font-semibold hover:bg-[#F3EFE9]"
+              onClick={() => void loadPullRequests(owner, repo, 'all')}
+            >
+              Повторить
+            </button>
+          </div>
+        ) : visiblePullRequests.length === 0 ? (
+          <div className="flex flex-col items-center justify-center gap-3 px-6 py-12 text-center" data-pr-empty={pullRequests.length === 0 ? 'no-pull-requests' : 'filtered'}>
+            <GitPullRequest size={40} className="text-[#7D7482]" />
+            {pullRequests.length === 0 ? (
+              <div>
+                <p className="text-sm font-semibold">В этом репозитории пока нет Pull Request</p>
+                <p className="mt-1 text-xs leading-relaxed text-[#7D7482]">Новая ветка сама по себе не создаёт PR. Выберите её в форме и нажмите «Создать PR».</p>
+              </div>
+            ) : (
+              <p className="text-sm text-[#7D7482]">Нет {filter === 'open' ? 'открытых' : 'закрытых'} pull requests</p>
+            )}
+            {pullRequests.length === 0 && (
+              <button
+                type="button"
+                className="flex items-center gap-2 rounded-lg bg-[#261732] px-3 py-2 text-xs font-semibold text-[#E7E0D6]"
+                onClick={() => setPrOpen(true)}
+              >
+                <Plus size={14} />
+                Создать PR из ветки
+              </button>
+            )}
           </div>
         ) : (
           <div className="divide-y divide-[rgba(38,23,50,.08)]">
-            {pullRequests.map((pr) => (
+            {visiblePullRequests.map((pr) => (
               <button
                 key={pr.id}
                 className="w-full p-4 text-left hover:bg-[#F3EFE9] transition-colors"
                 onClick={() => setSelectedPR(pr)}
+                data-pr-row={pr.number}
               >
                 <div className="flex items-start gap-3">
                   <div className={`w-2 h-2 rounded-full mt-1.5 flex-none ${getStatusColor(pr)}`} />

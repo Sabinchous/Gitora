@@ -1,7 +1,7 @@
 {
   "appId": "com.gitora.app",
   "productName": "Gitora",
-  "artifactName": "Gitora Setup 0.2.${ext}",
+  "artifactName": "Gitora Setup 0.2.2.${ext}",
   "directories": {
     "output": "outputs/release"
   },

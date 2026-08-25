@@ -1,0 +1,43 @@
+- generic [ref=f1e3]:
+  - complementary [ref=f1e4]:
+    - generic [ref=f1e5]:
+      - generic [ref=f1e6]: gitora
+      - button "Закрыть меню" [ref=f1e126]
+    - button "Не подключён Нажмите для входа" [ref=f1e15]:
+      - generic [ref=f1e20]:
+        - generic [ref=f1e21]: Не подключён
+        - generic [ref=f1e22]: Нажмите для входа
+    - generic [ref=f1e25]: ПРОЕКТЫ
+    - generic [ref=f1e27]:
+      - generic [ref=f1e28]:
+        - generic [ref=f1e32]: Поиск репозиториев
+        - textbox "Поиск репозиториев" [ref=f1e33]
+      - generic [ref=f1e34]:
+        - generic [ref=f1e35]: Сортировка репозиториев
+        - combobox "Сортировка репозиториев" [ref=f1e37]:
+          - generic [ref=f1e38]: Недавно обновлённые
+    - generic [ref=f1e40]:
+      - paragraph [ref=f1e41]: Репозитории не найдены
+      - paragraph [ref=f1e42]: Измените фильтр, чтобы увидеть другие проекты.
+    - generic [ref=f1e43]:
+      - button "Настройки" [ref=f1e44]
+      - button "Служебные действия Gitora" [ref=f1e49]
+  - main [ref=f1e54]:
+    - generic [ref=f1e55]:
+      - button "Открыть меню" [ref=f1e130]
+      - generic [ref=f1e56]: Проекты
+      - button "Подключиться с PAT" [ref=f1e58]: "??"
+    - generic [ref=f1e76]:
+      - heading "Gitora" [level=1] [ref=f1e82]
+      - paragraph [ref=f1e83]: Визуальный граф истории Git-репозиториев. Подключитесь с Personal Access Token, чтобы видеть коммиты, ветки и слияния в одном месте.
+      - button "Подключиться с PAT" [ref=f1e84]
+  - generic [ref=f1e133]:
+    - generic [ref=f1e134]:
+      - generic [ref=f1e140]:
+        - heading "Обновления" [level=2] [ref=f1e141]
+        - paragraph [ref=f1e142]: "Текущая версия: 0.2.2"
+      - button [ref=f1e143]
+    - generic [ref=f1e150]:
+      - heading "Gitora 0.3.0" [level=3] [ref=f1e152]
+      - paragraph [ref=f1e153]: 10 августа 2026 г.
+    - button "Все релизы на GitHub" [ref=f1e155]

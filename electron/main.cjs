@@ -14,6 +14,10 @@ const {
   isValidGitSha,
   isValidGitRef,
   isValidCommitLimit,
+  isValidGitHubUsername,
+  isValidInvitationId,
+  isValidCollaboratorPermission,
+  githubTeamState,
 } = require('./githubErrors.cjs');
 const { createMcpBridge } = require('./mcpBridge.cjs');
 const {
@@ -42,13 +46,16 @@ const isDev = process.argv.includes('--dev');
 const isMcpServer = process.argv.includes('--mcp-server');
 const GITHUB_ORIGIN = 'https://github.com';
 const API_ORIGIN = 'https://api.github.com';
+const GITORA_REPOSITORY = 'Sabinchous/Gitora';
 const REPO_PART = /^[A-Za-z0-9_.-]+$/;
+const TEMPLATE_PART = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/;
 const execFileAsync = promisify(execFile);
 
 let mainWindow;
 let githubToken = null;
 let githubTokenSource = 'none';
 const githubAuthState = authSnapshot();
+const userProfileCache = new Map();
 let mcpBridge = null;
 let mcpBridgeStartPromise = null;
 let mcpMetadataPath = '';
@@ -56,6 +63,7 @@ let mcpBridgeConnections = 0;
 let mcpLastError = '';
 let mcpLastSuccessfulRequest = '';
 let mcpWriteExpiresAt = 0;
+let mcpWriteDuration = null;
 const mcpActivityLog = [];
 const mcpClientHeartbeats = new Map();
 let lastMcpConfigLogKey = '';
@@ -63,7 +71,12 @@ let lastMcpClientLogKey = '';
 let mcpLogQueue = Promise.resolve();
 let isQuitting = false;
 const MCP_CLIENT_HEARTBEAT_TTL_MS = 15000;
-const MCP_WRITE_APPROVAL_TTL_MS = 10 * 60 * 1000;
+const MCP_WRITE_APPROVAL_TTLS_MS = Object.freeze({
+  '10m': 10 * 60 * 1000,
+  '30m': 30 * 60 * 1000,
+  '1h': 60 * 60 * 1000,
+});
+const MCP_WRITE_DURATIONS = new Set([...Object.keys(MCP_WRITE_APPROVAL_TTLS_MS), 'forever']);
 const MCP_BRIDGE_HEALTH_ENDPOINT = '/__gitora__/health';
 const MCP_SERVER_PATH = path.resolve(__dirname, '../mcp-server.cjs');
 const MCP_CLIENT_IDS = ['claude', 'cursor', 'codex'];
@@ -222,22 +235,29 @@ function mcpClientLog({ connected = false, session = '' } = {}) {
 }
 
 function isMcpWriteAllowed() {
+  if (mcpWriteExpiresAt === Number.POSITIVE_INFINITY) return true;
   if (mcpWriteExpiresAt <= Date.now()) {
     mcpWriteExpiresAt = 0;
+    mcpWriteDuration = null;
     return false;
   }
   return true;
 }
 
 function mcpWriteStatus() {
+  const allowed = isMcpWriteAllowed();
   return {
-    mcpWritesAllowed: isMcpWriteAllowed(),
-    ...(mcpWriteExpiresAt ? { mcpWritesExpiresAt: new Date(mcpWriteExpiresAt).toISOString() } : {}),
+    mcpWritesAllowed: allowed,
+    ...(allowed && mcpWriteDuration ? { mcpWritesDuration: mcpWriteDuration } : {}),
+    ...(Number.isFinite(mcpWriteExpiresAt) && mcpWriteExpiresAt > 0
+      ? { mcpWritesExpiresAt: new Date(mcpWriteExpiresAt).toISOString() }
+      : {}),
   };
 }
 
 function revokeMcpWrites() {
   mcpWriteExpiresAt = 0;
+  mcpWriteDuration = null;
   return mcpWriteStatus();
 }
 
@@ -372,6 +392,7 @@ async function restoreToken() {
 async function clearToken() {
   githubToken = null;
   githubTokenSource = 'none';
+  userProfileCache.clear();
   revokeMcpWrites();
   Object.assign(githubAuthState, authSnapshot());
   await fs.rm(tokenPath(), { force: true });
@@ -446,6 +467,7 @@ async function githubRequestPage(endpoint, options = {}, token = githubToken) {
     }
     return {
       data,
+      status: response.status,
       link: response.headers.get('link') || '',
       rateLimitRemaining: response.headers.get('x-ratelimit-remaining') || '',
       rateLimitLimit: response.headers.get('x-ratelimit-limit') || '',
@@ -457,6 +479,7 @@ async function githubRequestPage(endpoint, options = {}, token = githubToken) {
   if (response.status === 403 && remaining === '0') {
     const error = new Error('GitHub временно ограничил запросы. Попробуйте позже.');
     error.code = 'github';
+    error.status = response.status;
     if (requiredPermission) {
       githubWriteLog({ repository, action: `${method} ${endpoint}`, requiredPermission, result: error.message, status: response.status, errorCode: error.code });
     }
@@ -468,9 +491,9 @@ async function githubRequestPage(endpoint, options = {}, token = githubToken) {
     : '';
   const error = new Error(`${baseErrorMessage}${permissionHint}`);
   error.code = githubErrorCode(response.status, data?.message, endpoint);
+  error.status = response.status;
   if (requiredPermission) {
     error.requiredPermission = requiredPermission;
-    error.status = response.status;
     githubWriteLog({ repository, action: `${method} ${endpoint}`, requiredPermission, result: error.message, status: response.status, errorCode: error.code });
   }
   throw error;
@@ -479,6 +502,39 @@ async function githubRequestPage(endpoint, options = {}, token = githubToken) {
 async function githubRequest(endpoint, options = {}, token = githubToken) {
   const page = await githubRequestPage(endpoint, options, token);
   return page.data;
+}
+
+async function publicGitHubRequest(endpoint) {
+  let url;
+  try {
+    url = new URL(endpoint, API_ORIGIN);
+    if (url.origin !== API_ORIGIN) throw new Error('Недопустимый адрес GitHub API');
+  } catch {
+    throw new Error('Недопустимый адрес GitHub API');
+  }
+
+  let response;
+  try {
+    response = await fetch(url, {
+      headers: {
+        Accept: 'application/vnd.github+json',
+        'User-Agent': 'Gitora-App',
+        'X-GitHub-Api-Version': '2022-11-28',
+      },
+    });
+  } catch {
+    const error = new Error('Нет подключения к интернету.');
+    error.code = 'network';
+    throw error;
+  }
+
+  const data = response.status === 204 ? null : await response.json().catch(() => null);
+  if (response.ok) return data;
+
+  const error = new Error(githubErrorMessage(response.status, data?.message, endpoint, 'GET'));
+  error.code = githubErrorCode(response.status, data?.message, endpoint);
+  error.status = response.status;
+  throw error;
 }
 
 async function githubRequestAll(endpoint, options = {}, token = githubToken) {
@@ -509,6 +565,43 @@ function validRepo(owner, repo) {
   return REPO_PART.test(owner) && REPO_PART.test(repo);
 }
 
+function teamRepositoryEndpoint(owner, repo, suffix = '') {
+  if (!validRepo(owner, repo)) throw new Error('Некорректное имя репозитория');
+  return `/repos/${owner}/${repo}${suffix}`;
+}
+
+async function githubTeamList(endpoint) {
+  const data = await githubRequestAll(endpoint);
+  const items = Array.isArray(data) ? data : [];
+  return { state: githubTeamState(Array.isArray(data) ? 200 : 204, items), items };
+}
+
+async function githubContributorStats(endpoint) {
+  try {
+    const page = await githubRequestPage(endpoint);
+    const items = Array.isArray(page.data) ? page.data : [];
+    return { state: githubTeamState(page.status, items), items };
+  } catch (error) {
+    if (error?.status === 202) return { state: 'pending', items: [] };
+    throw error;
+  }
+}
+
+function collaboratorMutationPayload(permission) {
+  if (!isValidCollaboratorPermission(permission)) throw new Error('Некорректная роль участника');
+  return JSON.stringify({ permission });
+}
+
+async function mutateCollaborator(owner, repo, login, permission) {
+  if (!isValidGitHubUsername(login)) throw new Error('Некорректное имя пользователя GitHub');
+  const page = await githubRequestPage(teamRepositoryEndpoint(owner, repo, `/collaborators/${encodeURIComponent(login)}`), {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: collaboratorMutationPayload(permission),
+  });
+  return { status: page.status === 201 ? 201 : 204 };
+}
+
 function refPath(branch) {
   return String(branch).split('/').map(encodeURIComponent).join('/');
 }
@@ -527,6 +620,17 @@ function mapRelease(release) {
       downloadCount: asset.download_count,
     })),
   };
+}
+
+function mergeGitHubCommits(...histories) {
+  const commits = new Map();
+  for (const history of histories) {
+    if (!Array.isArray(history)) continue;
+    for (const commit of history) {
+      if (commit?.sha && !commits.has(commit.sha)) commits.set(commit.sha, commit);
+    }
+  }
+  return [...commits.values()];
 }
 
 function result(handler) {
@@ -873,9 +977,13 @@ async function resolveDownloadPath(fileName, options = {}) {
   return path.join(directory, safeFileName);
 }
 
-async function uploadFolderToRepo(owner, repo, folderData) {
+async function uploadFolderToRepo(owner, repo, folderData, repository) {
   const { files } = folderData;
   if (files.length === 0) return { uploadedCount: 0, skippedCount: 0, status: 'success' };
+  const branch = repository?.default_branch || 'main';
+  const branchState = repository?.default_branch
+    ? await getBranchState(owner, repo, branch)
+    : null;
 
   const blobShaMap = new Map();
   let uploadedCount = 0;
@@ -912,7 +1020,10 @@ async function uploadFolderToRepo(owner, repo, folderData) {
   const tree = await githubRequest(`/repos/${owner}/${repo}/git/trees`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ tree: treeItems }),
+    body: JSON.stringify({
+      ...(branchState?.treeSha ? { base_tree: branchState.treeSha } : {}),
+      tree: treeItems,
+    }),
   });
 
   const commit = await githubRequest(`/repos/${owner}/${repo}/git/commits`, {
@@ -921,14 +1032,23 @@ async function uploadFolderToRepo(owner, repo, folderData) {
     body: JSON.stringify({
       message: 'Initial commit',
       tree: tree.sha,
+      ...(branchState?.headSha ? { parents: [branchState.headSha] } : {}),
     }),
   });
 
-  await githubRequest(`/repos/${owner}/${repo}/git/refs`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ref: 'refs/heads/main', sha: commit.sha }),
-  });
+  if (branchState?.headSha) {
+    await githubRequest(`/repos/${owner}/${repo}/git/refs/heads/${refPath(branch)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sha: commit.sha, force: false }),
+    });
+  } else {
+    await githubRequest(`/repos/${owner}/${repo}/git/refs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ref: `refs/heads/${branch}`, sha: commit.sha }),
+    });
+  }
 
   const status = skippedCount > 0 ? 'partial' : 'success';
   return { uploadedCount, skippedCount, status };
@@ -1547,6 +1667,8 @@ async function runAiDiagnostics(owner, repo, sha) {
       ['POST', `/repos/${owner}/${repo}/issues`, 'создание Issue', 'Issues: write'],
       ['POST', `/repos/${owner}/${repo}/issues/1/comments`, 'добавление комментария', 'Issues: write или Pull requests: write'],
       ['POST', `/repos/${owner}/${repo}/pulls`, 'создание Pull Request', 'Pull requests: write'],
+      ['POST', `/repos/${owner}/${repo}/pulls/1/reviews`, 'одобрение Pull Request', 'Pull requests: write'],
+      ['PUT', `/repos/${owner}/${repo}/pulls/1/merge`, 'слияние Pull Request', 'Contents: write'],
     ];
     for (const [method, endpoint, action, requiredPermission] of writeChecks) {
       githubWriteLog({
@@ -1560,7 +1682,7 @@ async function runAiDiagnostics(owner, repo, sha) {
       id: 'write-permissions',
       label: 'Проверка прав записи',
       status: 'warning',
-      detail: 'Изменяющие GitHub операции не выполняются автоматически. Требуются Contents: write, Issues: write и Pull requests: write; см. журнал GitHub Write.',
+      detail: 'Изменяющие GitHub операции не выполняются автоматически. Для PR нужны Pull requests: write (одобрение) и Contents: write (слияние); см. журнал GitHub Write.',
     });
   } else {
     steps.push({ id: 'repository', label: 'Текущий репозиторий', status: 'skipped', detail: 'Выберите репозиторий в Gitora' });
@@ -1671,9 +1793,18 @@ ipcMain.handle('ai:restart-mcp', result(async () => {
   return getAiStatusData();
 }));
 
-ipcMain.handle('ai:allow-mcp-writes', result(async () => {
-  mcpWriteExpiresAt = Date.now() + MCP_WRITE_APPROVAL_TTL_MS;
-  mcpLog('mcp_write_approval_granted', { expiresAt: new Date(mcpWriteExpiresAt).toISOString() });
+ipcMain.handle('ai:allow-mcp-writes', result(async (_event, options = {}) => {
+  const duration = options?.duration || '10m';
+  if (!MCP_WRITE_DURATIONS.has(duration)) throw new Error('Некорректный срок разрешения записи MCP');
+
+  mcpWriteDuration = duration;
+  mcpWriteExpiresAt = duration === 'forever'
+    ? Number.POSITIVE_INFINITY
+    : Date.now() + MCP_WRITE_APPROVAL_TTLS_MS[duration];
+  mcpLog('mcp_write_approval_granted', {
+    duration,
+    expiresAt: Number.isFinite(mcpWriteExpiresAt) ? new Date(mcpWriteExpiresAt).toISOString() : null,
+  });
   return mcpWriteStatus();
 }));
 
@@ -1695,18 +1826,87 @@ ipcMain.handle('github:repository', result(async (_event, { owner, repo, commitL
   if (!isValidCommitLimit(commitLimit)) throw new Error('Некорректный лимит коммитов');
   const repositoryInfo = await githubRequest(`/repos/${owner}/${repo}`);
   if (isEmptyRepository(repositoryInfo)) {
-    return { commits: [], branches: [], empty: true, defaultBranch: repositoryInfo.default_branch || 'main' };
+    return { commits: [], branches: [], empty: true, defaultBranch: repositoryInfo.default_branch || 'main', repository: repositoryInfo };
   }
-  const [commits, branches] = await Promise.all([
+  const defaultBranch = repositoryInfo.default_branch || 'main';
+  const [defaultCommits, branches] = await Promise.all([
     githubRequest(`/repos/${owner}/${repo}/commits?per_page=${commitLimit}`),
     githubRequest(`/repos/${owner}/${repo}/branches?per_page=100`),
   ]);
-  return { commits, branches, empty: false, defaultBranch: repositoryInfo.default_branch || 'main' };
+  const defaultCommitShas = new Set(defaultCommits.map(commit => commit.sha));
+  const branchHistories = await Promise.all(
+    branches
+      .filter(branch => branch.name !== defaultBranch && branch.commit?.sha && !defaultCommitShas.has(branch.commit.sha))
+      .map(async branch => {
+        try {
+          return await githubRequest(`/repos/${owner}/${repo}/commits?sha=${encodeURIComponent(branch.name)}&per_page=${commitLimit}`);
+        } catch {
+          return [];
+        }
+      }),
+  );
+  const commits = mergeGitHubCommits(defaultCommits, ...branchHistories);
+  return { commits, branches, empty: false, defaultBranch, repository: repositoryInfo };
+}));
+
+ipcMain.handle('github:collaborators', result(async (_event, { owner, repo }) => (
+  githubTeamList(teamRepositoryEndpoint(owner, repo, '/collaborators?affiliation=all&per_page=100'))
+)));
+
+ipcMain.handle('github:invitations', result(async (_event, { owner, repo }) => (
+  githubTeamList(teamRepositoryEndpoint(owner, repo, '/invitations?per_page=100'))
+)));
+
+ipcMain.handle('github:contributors', result(async (_event, { owner, repo }) => (
+  githubTeamList(teamRepositoryEndpoint(owner, repo, '/contributors?anon=1&per_page=100'))
+)));
+
+ipcMain.handle('github:contributor-stats', result(async (_event, { owner, repo }) => (
+  githubContributorStats(teamRepositoryEndpoint(owner, repo, '/stats/contributors'))
+)));
+
+ipcMain.handle('github:contributor-timeline', result(async (_event, { owner, repo, login }) => {
+  if (!isValidGitHubUsername(login)) throw new Error('Некорректное имя пользователя GitHub');
+  return githubTeamList(teamRepositoryEndpoint(owner, repo, `/commits?author=${encodeURIComponent(login)}&per_page=100`));
+}));
+
+ipcMain.handle('github:user-profile', result(async (_event, login) => {
+  if (!isValidGitHubUsername(login)) throw new Error('Некорректное имя пользователя GitHub');
+  const cached = userProfileCache.get(login);
+  if (cached && cached.expiresAt > Date.now()) return cached.profile;
+  const profile = await githubRequest(`/users/${encodeURIComponent(login)}`);
+  userProfileCache.set(login, { profile, expiresAt: Date.now() + 5 * 60 * 1000 });
+  return profile;
+}));
+
+ipcMain.handle('github:add-collaborator', result(async (_event, { owner, repo, login, permission }) => (
+  mutateCollaborator(owner, repo, login, permission)
+)));
+
+ipcMain.handle('github:update-collaborator', result(async (_event, { owner, repo, login, permission }) => (
+  mutateCollaborator(owner, repo, login, permission)
+)));
+
+ipcMain.handle('github:remove-collaborator', result(async (_event, { owner, repo, login }) => {
+  if (!isValidGitHubUsername(login)) throw new Error('Некорректное имя пользователя GitHub');
+  const page = await githubRequestPage(teamRepositoryEndpoint(owner, repo, `/collaborators/${encodeURIComponent(login)}`), { method: 'DELETE' });
+  return { status: page.status === 201 ? 201 : 204 };
+}));
+
+ipcMain.handle('github:cancel-invitation', result(async (_event, { owner, repo, invitationId }) => {
+  if (!isValidInvitationId(invitationId)) throw new Error('Некорректный идентификатор приглашения');
+  const page = await githubRequestPage(teamRepositoryEndpoint(owner, repo, `/invitations/${invitationId}`), { method: 'DELETE' });
+  return { status: page.status === 201 ? 201 : 204 };
 }));
 
 ipcMain.handle('github:create-repo', result(async (_event, input) => {
   const name = typeof input?.name === 'string' ? input.name.trim() : '';
   if (!name || !REPO_PART.test(name)) throw new Error('РќРµРєРѕСЂСЂРµРєС‚РЅРѕРµ РёРјСЏ СЂРµРїРѕР·РёС‚РѕСЂРёСЏ');
+  const autoInit = input?.autoInit === undefined ? true : Boolean(input.autoInit);
+  const gitignoreTemplate = typeof input?.gitignoreTemplate === 'string' ? input.gitignoreTemplate.trim() : '';
+  const licenseTemplate = typeof input?.licenseTemplate === 'string' ? input.licenseTemplate.trim() : '';
+  if (gitignoreTemplate && !TEMPLATE_PART.test(gitignoreTemplate)) throw new Error('Некорректный шаблон .gitignore');
+  if (licenseTemplate && !TEMPLATE_PART.test(licenseTemplate)) throw new Error('Некорректный шаблон лицензии');
   const repo = await githubRequest('/user/repos', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -1714,6 +1914,9 @@ ipcMain.handle('github:create-repo', result(async (_event, input) => {
       name,
       description: typeof input.description === 'string' ? input.description.trim() : '',
       private: Boolean(input.private),
+      auto_init: autoInit,
+      ...(gitignoreTemplate ? { gitignore_template: gitignoreTemplate } : {}),
+      ...(licenseTemplate ? { license_template: licenseTemplate } : {}),
     }),
   });
 
@@ -1729,7 +1932,7 @@ ipcMain.handle('github:create-repo', result(async (_event, input) => {
 
   try {
     const [owner] = repo.full_name.split('/');
-    const uploadResult = await uploadFolderToRepo(owner, repo.name, folderData);
+    const uploadResult = await uploadFolderToRepo(owner, repo.name, folderData, repo);
     return { repo, ...uploadResult };
   } catch (uploadError) {
     return { repo, uploadStatus: 'error', uploadedCount: 0, skippedCount: folderData.fileCount };
@@ -1801,6 +2004,52 @@ ipcMain.handle('github:pull-request', result(async (_event, { owner, repo, numbe
   if (!validRepo(owner, repo)) throw new Error('РќРµРєРѕСЂСЂРµРєС‚РЅРѕРµ РёРјСЏ СЂРµРїРѕР·РёС‚РѕСЂРёСЏ');
   if (!isValidIssueNumber(number)) throw new Error('Некорректный номер pull request');
   return githubRequest(`/repos/${owner}/${repo}/pulls/${number}`);
+}));
+
+ipcMain.handle('github:pull-request-files', result(async (_event, { owner, repo, number }) => {
+  if (!validRepo(owner, repo)) throw new Error('Некорректное имя репозитория');
+  if (!isValidIssueNumber(number)) throw new Error('Некорректный номер pull request');
+  return githubRequest(`/repos/${owner}/${repo}/pulls/${number}/files?per_page=100`);
+}));
+
+ipcMain.handle('github:approve-pull-request', result(async (_event, { owner, repo, number }) => {
+  if (!validRepo(owner, repo)) throw new Error('Некорректное имя репозитория');
+  if (!isValidIssueNumber(number)) throw new Error('Некорректный номер pull request');
+  return githubRequest(`/repos/${owner}/${repo}/pulls/${number}/reviews`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ event: 'APPROVE' }),
+  });
+}));
+
+ipcMain.handle('github:merge-pull-request', result(async (_event, { owner, repo, number, sha }) => {
+  if (!validRepo(owner, repo)) throw new Error('Некорректное имя репозитория');
+  if (!isValidIssueNumber(number)) throw new Error('Некорректный номер pull request');
+  if (sha !== undefined && !isValidGitSha(sha)) throw new Error('Некорректный SHA pull request');
+
+  const payload = { merge_method: 'merge', ...(sha ? { sha } : {}) };
+  const mergeResult = await githubRequest(`/repos/${owner}/${repo}/pulls/${number}/merge`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!mergeResult?.merged) {
+    const error = new Error(mergeResult?.message || 'GitHub не объединил pull request');
+    error.status = 409;
+    throw error;
+  }
+  return mergeResult;
+}));
+
+ipcMain.handle('github:update-pull-request-state', result(async (_event, { owner, repo, number, state }) => {
+  if (!validRepo(owner, repo)) throw new Error('Некорректное имя репозитория');
+  if (!isValidIssueNumber(number)) throw new Error('Некорректный номер pull request');
+  if (state !== 'open' && state !== 'closed') throw new Error('Некорректное состояние pull request');
+  return githubRequest(`/repos/${owner}/${repo}/pulls/${number}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ state }),
+  });
 }));
 
 ipcMain.handle('github:create-pull-request', result(async (_event, { owner, repo, title, body, head, base }) => {
@@ -2070,7 +2319,8 @@ ipcMain.handle('app:get-current-version', result(async () => {
 }));
 
 ipcMain.handle('app:get-releases', result(async () => {
-  const releases = await githubRequest('/repos/Appappars/Gitora/releases?per_page=20');
+  const releases = await publicGitHubRequest(`/repos/${GITORA_REPOSITORY}/releases?per_page=20`);
+  if (!Array.isArray(releases)) throw new Error('GitHub вернул некорректный список релизов');
   return releases.map(mapRelease);
 }));
 

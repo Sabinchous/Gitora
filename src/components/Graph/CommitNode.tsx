@@ -18,6 +18,8 @@ const CommitNodeComponent: React.FC<CommitNodeProps> = ({
   onClick,
 }) => (
   <button
+    type="button"
+    data-graph-node
     className={`absolute grid place-items-center cursor-pointer rounded-full ${isSelected || commit.isMerge ? 'w-9 h-9' : 'w-8 h-8'} ${isSelected ? 'z-10' : 'z-[1]'}`}
     style={{
       left: commit.x,

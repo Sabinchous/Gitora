@@ -15,6 +15,11 @@ const repo = {
   forks_count: 0,
   updated_at: '2026-06-21T12:00:00Z',
   default_branch: 'main',
+  html_url: 'https://github.com/smoke-user/smoke-repo',
+  archived: false,
+  disabled: false,
+  owner: { login: 'smoke-user', type: 'User', avatar_url: '' },
+  permissions: { pull: true, push: true, maintain: true, admin: true },
 };
 const syncedRepo = {
   id: 2,
@@ -30,6 +35,46 @@ const syncedRepo = {
 let repoListCalls = 0;
 let lastGitPush = null;
 let lastReleaseInput = null;
+let smokeCollaborators = [
+  { login: 'smoke-user', name: 'Smoke User', avatar_url: '', html_url: 'https://github.com/smoke-user', role_name: 'admin', permissions: { pull: true, push: true, admin: true } },
+  { login: 'octocat', name: null, avatar_url: '', html_url: 'https://github.com/octocat', role_name: 'push', permissions: { pull: true, push: true } },
+];
+let smokeInvitations = [{ id: 42, invitee: { login: 'pending-user', name: null, avatar_url: '' }, permissions: 'pull', created_at: '2026-07-24T12:00:00Z' }];
+const smokeContributors = [
+  { login: 'octocat', name: 'The Octocat', avatar_url: '', html_url: 'https://github.com/octocat', contributions: 12 },
+  { login: null, email: 'anonymous@example.com', contributions: 3, anonymous: true },
+];
+const smokeStats = [{ author: { login: 'octocat', name: 'The Octocat', avatar_url: '', html_url: 'https://github.com/octocat' }, total: 12, weeks: [{ w: 1782172800, a: 20, d: 4, c: 6 }, { w: 1782777600, a: 8, d: 2, c: 6 }] }];
+const smokePullRequest = {
+  id: 7,
+  number: 7,
+  title: 'Безопасное обновление README',
+  body: 'Проверить изменения перед слиянием.',
+  state: 'open',
+  merged: false,
+  draft: false,
+  mergeable: true,
+  mergeable_state: 'clean',
+  additions: 6,
+  deletions: 2,
+  changed_files: 1,
+  user: { login: 'octocat', avatar_url: '' },
+  head: { ref: 'feature/readme', sha: '0123456789abcdef0123456789abcdef01234567' },
+  base: { ref: 'main' },
+  created_at: '2026-07-24T12:00:00Z',
+  updated_at: '2026-07-24T12:00:00Z',
+  html_url: 'https://github.com/smoke-user/smoke-repo/pull/7',
+};
+const smokePullRequestFiles = [{
+  sha: '0123456789abcdef0123456789abcdef01234567',
+  filename: 'README.md',
+  status: 'modified',
+  additions: 6,
+  deletions: 2,
+  changes: 8,
+}];
+let smokePullRequestApproved = false;
+let smokePullRequestMerged = false;
 const commit = (sha, message, date, parents) => ({
   sha,
   commit: { message, author: { name: 'Smoke User', date } },
@@ -47,6 +92,7 @@ ipcMain.handle('github:repos', async () => {
 ipcMain.handle('github:repository', async () => ({
   success: true,
   data: {
+    repository: repo,
     branches: [
       { name: 'codex-gitora-relise', commit: { sha: 'feature' } },
       { name: 'main', commit: { sha: 'merge' } },
@@ -81,6 +127,17 @@ ipcMain.handle('github:commit-detail', async (_event, { sha }) => {
 });
 ipcMain.handle('github:create-repo', async () => ({ success: false, error: 'Disabled in smoke test' }));
 ipcMain.handle('github:delete-repo', async () => ({ success: true, data: null }));
+ipcMain.handle('github:pull-requests', async () => ({ success: true, data: smokePullRequestMerged ? [] : [smokePullRequest] }));
+ipcMain.handle('github:pull-request', async () => ({ success: true, data: smokePullRequest }));
+ipcMain.handle('github:pull-request-files', async () => ({ success: true, data: smokePullRequestFiles }));
+ipcMain.handle('github:approve-pull-request', async () => {
+  smokePullRequestApproved = true;
+  return { success: true, data: { id: 701, state: 'APPROVED', user } };
+});
+ipcMain.handle('github:merge-pull-request', async () => {
+  smokePullRequestMerged = true;
+  return { success: true, data: { merged: true, message: 'Pull Request successfully merged', sha: smokePullRequest.head.sha } };
+});
 ipcMain.handle('github:create-release', async (_event, { input }) => {
   lastReleaseInput = input;
   return { success: true, data: { tag: input.tagName, name: input.name || input.tagName, body: input.body || '', publishedAt: '2026-06-21T12:00:00Z', prerelease: Boolean(input.prerelease), assets: [] } };
@@ -99,6 +156,28 @@ ipcMain.handle('github:check-folder-changes', async () => ({
     changes: [{ path: 'README.md', status: 'added' }],
   },
 }));
+ipcMain.handle('github:collaborators', async () => ({ success: true, data: { state: smokeCollaborators.length ? 'loaded' : 'empty', items: smokeCollaborators } }));
+ipcMain.handle('github:invitations', async () => ({ success: true, data: { state: smokeInvitations.length ? 'loaded' : 'empty', items: smokeInvitations } }));
+ipcMain.handle('github:contributors', async () => ({ success: true, data: { state: 'loaded', items: smokeContributors } }));
+ipcMain.handle('github:contributor-stats', async () => ({ success: true, data: { state: 'loaded', items: smokeStats } }));
+ipcMain.handle('github:contributor-timeline', async (_event, { login }) => ({ success: true, data: { state: login === 'octocat' ? 'empty' : 'loaded', items: [] } }));
+ipcMain.handle('github:user-profile', async (_event, login) => ({ success: true, data: { login, name: login === 'octocat' ? 'The Octocat' : null, avatar_url: '', html_url: `https://github.com/${login}` } }));
+ipcMain.handle('github:add-collaborator', async (_event, { login, permission }) => {
+  smokeInvitations = [...smokeInvitations, { id: 43, invitee: { login, name: null, avatar_url: '' }, permissions: permission, created_at: '2026-07-24T12:00:00Z' }];
+  return { success: true, data: { status: 201 } };
+});
+ipcMain.handle('github:update-collaborator', async (_event, { login, permission }) => {
+  smokeCollaborators = smokeCollaborators.map(item => item.login === login ? { ...item, role_name: permission } : item);
+  return { success: true, data: { status: 204 } };
+});
+ipcMain.handle('github:remove-collaborator', async (_event, { login }) => {
+  smokeCollaborators = smokeCollaborators.filter(item => item.login !== login);
+  return { success: true, data: { status: 204 } };
+});
+ipcMain.handle('github:cancel-invitation', async (_event, { invitationId }) => {
+  smokeInvitations = smokeInvitations.filter(item => item.id !== invitationId);
+  return { success: true, data: { status: 204 } };
+});
 ipcMain.handle('github:commit-folder-changes', async () => ({ success: true, data: { sha: 'folder', changed: true, count: 1 } }));
 ipcMain.handle('git:check-folder-changes', async () => ({
   success: true,
@@ -214,6 +293,18 @@ app.whenReady().then(async () => {
         const node = document.querySelector('button[aria-label^="Third commit"]');
         const graphSvg = document.querySelector('svg[data-commit-graph]');
         const edge = graphSvg?.querySelector('path');
+        const createRepoTrigger = [...document.querySelectorAll('button')]
+          .find(button => button.textContent?.trim() === 'Новый репозиторий');
+        createRepoTrigger?.click();
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const createModal = document.querySelector('#create-title')?.closest('[role="dialog"]');
+        const createReadmeDefault = createModal?.querySelector('[data-create-readme]')?.getAttribute('aria-checked') === 'true';
+        const createConfigOptionsVisible = Boolean(
+          createModal?.querySelector('button[aria-label="Шаблон .gitignore"]')
+          && createModal?.querySelector('button[aria-label="Шаблон лицензии"]')
+        );
+        createModal?.querySelector('button[aria-label="Закрыть"]')?.click();
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
         [...document.querySelectorAll('button')]
           .find(button => button.textContent?.trim() === 'Настройки')?.click();
         await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
@@ -399,6 +490,133 @@ app.whenReady().then(async () => {
         const repositoryListUpdated = document.body.innerText.includes('synced-repo');
         const refreshTimestampVisible = document.body.innerText.includes('Обновлено в');
 
+        document.querySelector('[data-team-tab]')?.click();
+        const teamDeadline = Date.now() + 2500;
+        while (!document.querySelector('[data-team-collaborator-list]') && Date.now() < teamDeadline) {
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        const teamTabVisible = Boolean(document.querySelector('[data-team-panel]'));
+        const collaboratorsLoaded = Boolean(document.querySelector('[data-team-collaborator="octocat"]'));
+        const pendingInvitationVisible = Boolean(document.querySelector('[data-team-invitations]')?.textContent?.includes('pending-user'));
+        document.querySelector('[data-team-collaborator="octocat"]')?.click();
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const collaboratorDetailVisible = Boolean(document.querySelector('[data-team-collaborator-detail]')?.textContent?.includes('@octocat'));
+        const permissionSelect = document.querySelector('button[aria-label="Разрешение участника (Permission)"]');
+        permissionSelect?.click();
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const permissionInfo = document.querySelector('[role="listbox"][aria-label="Разрешение участника (Permission)"] [data-select-info="pull"]');
+        permissionInfo?.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const permissionTooltip = [...document.querySelectorAll('[role="tooltip"]')]
+          .find(tooltip => tooltip.textContent?.includes('issues'));
+        const permissionTooltipVisible = Boolean(
+          permissionTooltip
+          && permissionTooltip.classList.contains('visible')
+          && permissionTooltip.classList.contains('opacity-100')
+        );
+        [...document.querySelectorAll('[role="listbox"][aria-label="Разрешение участника (Permission)"] [role="option"]')]
+          .find(option => option.textContent?.includes('Read'))?.click();
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const roleConfirmVisible = document.body.innerText.includes('Понизить роль?');
+        [...document.querySelectorAll('[role="dialog"] button')]
+          .find(button => button.textContent?.trim() === 'Подтвердить')?.click();
+        await new Promise(resolve => setTimeout(resolve, 60));
+        document.querySelector('[data-team-collaborator="octocat"]')?.click();
+        document.querySelector('[data-team-remove]')?.click();
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const removeConfirmVisible = document.body.innerText.includes('Удалить участника?');
+        [...document.querySelectorAll('[role="dialog"] button')]
+          .find(button => button.textContent?.trim() === 'Подтвердить')?.click();
+        await new Promise(resolve => setTimeout(resolve, 60));
+        const collaboratorRemoved = !document.querySelector('[data-team-collaborator="octocat"]');
+        document.querySelector('[data-team-add]')?.click();
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const teamLoginInput = document.querySelector('#team-login');
+        const teamLoginSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        if (teamLoginInput && teamLoginSetter) {
+          teamLoginSetter.call(teamLoginInput, 'new-user');
+          teamLoginInput.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        document.querySelector('[role="dialog"] button[type="submit"]')?.click();
+        await new Promise(resolve => setTimeout(resolve, 80));
+        const addedInvitationVisible = Boolean(document.querySelector('[data-team-invitations]')?.textContent?.includes('new-user'));
+        document.querySelector('[data-team-cancel-invitation="43"]')?.click();
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const cancelConfirmVisible = document.body.innerText.includes('Отменить приглашение?');
+        [...document.querySelectorAll('[role="dialog"] button')]
+          .find(button => button.textContent?.trim() === 'Подтвердить')?.click();
+        await new Promise(resolve => setTimeout(resolve, 60));
+        const invitationCancelled = !document.querySelector('[data-team-cancel-invitation="43"]');
+        document.querySelector('[data-team-contributors-tab]')?.click();
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const contributorsLoaded = Boolean(document.querySelector('[data-team-contributor="octocat"]'));
+        const anonymousContributorVisible = Boolean(document.querySelector('[data-team-contributor="anonymous"]'));
+        const contributorSort = document.querySelector('button[aria-label="Сортировка contributors"]');
+        contributorSort?.click();
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        [...document.querySelectorAll('[role="listbox"][aria-label="Сортировка contributors"] [role="option"]')]
+          .find(option => option.textContent?.trim() === 'Name')?.click();
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const contributorSortVisible = contributorSort?.textContent?.includes('Name') || false;
+        document.querySelector('[data-team-contributor="octocat"]')?.click();
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const contributorDetailVisible = Boolean(
+          document.querySelector('[data-team-contributor-detail]')?.textContent?.includes('Additions / deletions')
+          && document.querySelector('[data-team-contributor-detail]')?.textContent?.includes('First activity')
+        );
+        document.querySelector('[data-team-show-commits]')?.click();
+        const authorFilterDeadline = Date.now() + 1200;
+        while (!document.body.innerText.includes('Нет коммитов по выбранным фильтрам') && Date.now() < authorFilterDeadline) {
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        const showCommitsFilterVisible = document.body.innerText.includes('Нет коммитов по выбранным фильтрам');
+        document.querySelector('[data-team-tab]')?.click();
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        document.querySelector('[data-team-refresh]')?.click();
+        const teamRefreshVisible = Boolean(document.querySelector('[data-team-refresh]'));
+        document.querySelector('[data-pr-tab]')?.click();
+        const pullRequestDeadline = Date.now() + 2500;
+        while (!document.querySelector('[data-pr-row="7"]') && Date.now() < pullRequestDeadline) {
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        const pullRequestsLoaded = Boolean(document.querySelector('[data-pr-row="7"]'));
+        document.querySelector('[data-pr-row="7"]')?.click();
+        const pullRequestDetailDeadline = Date.now() + 2500;
+        while (!document.querySelector('[data-pr-security-review]') && Date.now() < pullRequestDetailDeadline) {
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        const prSecurityReviewVisible = Boolean(
+          document.querySelector('[data-pr-security-review]')?.textContent?.includes('README.md')
+          && document.querySelector('[data-pr-files]')
+        );
+        document.querySelector('[data-pr-approve]')?.click();
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const prApproveConfirmVisible = Boolean(document.querySelector('[data-pr-confirmation="approve"]'));
+        [...document.querySelectorAll('[data-pr-confirmation="approve"] button')]
+          .find(button => button.textContent?.trim() === 'Одобрить PR')?.click();
+        const approvalDeadline = Date.now() + 2000;
+        while (!document.querySelector('[data-pr-approve]')?.textContent?.includes('PR одобрен') && Date.now() < approvalDeadline) {
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        const prApprovedVisible = document.querySelector('[data-pr-approve]')?.textContent?.includes('PR одобрен') || false;
+        document.querySelector('[data-pr-merge]')?.click();
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const prMergeConfirmVisible = Boolean(document.querySelector('[data-pr-confirmation="merge"]'));
+        [...document.querySelectorAll('[data-pr-confirmation="merge"] button')]
+          .find(button => button.textContent?.trim() === 'Объединить')?.click();
+        const mergeDeadline = Date.now() + 2000;
+        while (document.querySelector('[data-pr-row="7"]') && Date.now() < mergeDeadline) {
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        const pullRequestMerged = !document.querySelector('[data-pr-row="7"]');
+        [...document.querySelectorAll('button')].find(button => button.textContent?.trim() === 'Граф')?.click();
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        document.querySelector('button[title="Фильтры графа"]')?.click();
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        [...document.querySelectorAll('#graph-filters button')]
+          .find(button => button.textContent?.includes('Очистить'))?.click();
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
         document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
         await new Promise(resolve => requestAnimationFrame(resolve));
 
@@ -507,10 +725,10 @@ app.whenReady().then(async () => {
         [...document.querySelectorAll('[role="menuitem"]')]
           .find(button => button.textContent?.includes('Удалить с GitHub'))?.click();
         await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-        const deleteConfirmVisible = document.body.innerText.includes('Удалить репозиторий с GitHub?')
+        const deleteConfirmVisible = document.body.innerText.includes('Удалить репозиторий?')
           && document.body.innerText.includes('synced-repo');
         [...document.querySelectorAll('button')]
-          .find(button => button.textContent?.trim() === 'Удалить с GitHub')?.click();
+          .find(button => button.textContent?.trim() === 'Удалить')?.click();
         const deletionDeadline = Date.now() + 2000;
         while (document.body.innerText.includes('synced-repo') && Date.now() < deletionDeadline) {
           await new Promise(resolve => setTimeout(resolve, 25));
@@ -623,6 +841,31 @@ app.whenReady().then(async () => {
           graphHiddenVisible,
           graphRestoredVisible,
           repositoryListUpdated,
+          createReadmeDefault,
+          createConfigOptionsVisible,
+          teamTabVisible,
+          collaboratorsLoaded,
+          pendingInvitationVisible,
+          collaboratorDetailVisible,
+          permissionTooltipVisible,
+          roleConfirmVisible,
+          removeConfirmVisible,
+          collaboratorRemoved,
+          addedInvitationVisible,
+          cancelConfirmVisible,
+          invitationCancelled,
+          contributorsLoaded,
+          anonymousContributorVisible,
+          contributorSortVisible,
+          contributorDetailVisible,
+          showCommitsFilterVisible,
+          teamRefreshVisible,
+          pullRequestsLoaded,
+          prSecurityReviewVisible,
+          prApproveConfirmVisible,
+          prApprovedVisible,
+          prMergeConfirmVisible,
+          pullRequestMerged,
         searchFiltersProjects,
         sortPreferenceVisible,
         darkThemeOptionsReadable,
@@ -679,6 +922,15 @@ app.whenReady().then(async () => {
       && mobileState.detailPanelParentDirection === 'column';
     state.mobileDetailPosition = mobileState.detailPanelPosition;
     state.mobileDetailParentDirection = mobileState.detailPanelParentDirection;
+    const responsiveWidths = [];
+    for (const width of [320, 736, 1024]) {
+      window.setSize(width, 720);
+      await new Promise(resolve => setTimeout(resolve, 120));
+      const viewportState = await window.webContents.executeJavaScript('({ width: innerWidth, scrollWidth: document.documentElement.scrollWidth, teamTab: Boolean(document.querySelector("[data-team-tab]")) })');
+      responsiveWidths.push({ width, ...viewportState, fits: viewportState.scrollWidth <= Math.max(320, viewportState.width) + 8 });
+    }
+    state.responsiveWidths = responsiveWidths;
+    state.responsiveTeamVisible = responsiveWidths.every(item => item.teamTab && item.fits);
 
     if (
       !state.rootChildren
@@ -707,6 +959,28 @@ app.whenReady().then(async () => {
       || !state.panelStaysVisible
       || !state.refreshTimestampVisible
       || !state.repositoryListUpdated
+      || !state.teamTabVisible
+      || !state.collaboratorsLoaded
+      || !state.pendingInvitationVisible
+      || !state.collaboratorDetailVisible
+      || !state.roleConfirmVisible
+      || !state.removeConfirmVisible
+      || !state.collaboratorRemoved
+      || !state.addedInvitationVisible
+      || !state.cancelConfirmVisible
+      || !state.invitationCancelled
+      || !state.contributorsLoaded
+      || !state.anonymousContributorVisible
+      || !state.contributorSortVisible
+      || !state.contributorDetailVisible
+      || !state.showCommitsFilterVisible
+      || !state.teamRefreshVisible
+      || !state.pullRequestsLoaded
+      || !state.prSecurityReviewVisible
+      || !state.prApproveConfirmVisible
+      || !state.prApprovedVisible
+      || !state.prMergeConfirmVisible
+      || !state.pullRequestMerged
       || !state.searchFiltersProjects
       || !state.sortPreferenceVisible
       || !state.darkThemeOptionsReadable
@@ -729,6 +1003,7 @@ app.whenReady().then(async () => {
       || !state.changeModesAbsent
       || !state.autoMessageMultiline
       || !state.changeMessagePreserved
+      || !state.responsiveTeamVisible
       || !state.pushConfirmed
       || errors.length
     ) {

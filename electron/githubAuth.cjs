@@ -49,9 +49,13 @@ function githubWriteRequirement(method = 'GET', endpoint = '') {
       : 'Contents: write';
   }
   if (/\/git\/(blobs|trees|commits|refs)(\/|$)/.test(normalizedEndpoint)) return 'Contents: write';
+  if (/\/pulls\/\d+\/merge$/.test(normalizedEndpoint)) return 'Contents: write';
   if (/\/pulls(\/|$)/.test(normalizedEndpoint)) return 'Pull requests: write';
   if (/\/issues\/\d+\/comments$/.test(normalizedEndpoint)) return 'Issues: write or Pull requests: write';
   if (/\/issues(\/|$)/.test(normalizedEndpoint)) return 'Issues: write';
+  if (/\/collaborators(\/|$)/.test(normalizedEndpoint) || /\/invitations(\/|$)/.test(normalizedEndpoint)) {
+    return 'Administration: write';
+  }
   return 'Repository write permission';
 }
 
@@ -74,6 +78,7 @@ function buildGitHubPermissionChecks({ permissions = {}, scopes = [], acceptedPe
     check('Создание Issue и комментария', 'Issues: write', 'issues'),
     check('Создание Pull Request', 'Pull requests: write', 'pull_requests'),
     check('Чтение репозитория', 'Metadata: read', 'metadata', permissions.pull === true, permissions.pull === false),
+    check('Управление участниками', 'Administration: write', 'administration', permissions.admin === true, permissions.admin === false),
   ];
 }
 

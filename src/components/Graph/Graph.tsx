@@ -20,7 +20,12 @@ interface DragState {
   panY: number;
 }
 
-export const Graph: React.FC = () => {
+interface GraphProps {
+  focusAuthor?: string;
+  onAuthorFocusApplied?: () => void;
+}
+
+export const Graph: React.FC<GraphProps> = ({ focusAuthor = '', onAuthorFocusApplied }) => {
   const {
     commits,
     branches,
@@ -71,6 +76,13 @@ export const Graph: React.FC = () => {
   useEffect(() => {
     setFilters(current => current.branch === branchFilter ? current : { ...current, branch: branchFilter });
   }, [branchFilter]);
+
+  useEffect(() => {
+    if (!focusAuthor) return;
+    setFilters(current => current.author === focusAuthor ? current : { ...current, author: focusAuthor });
+    previousFitKey.current = '';
+    onAuthorFocusApplied?.();
+  }, [focusAuthor, onAuthorFocusApplied]);
 
   const visibleNodes = useMemo(() => {
     if (!orientedLayout) return [];
@@ -153,8 +165,9 @@ export const Graph: React.FC = () => {
   const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
     const target = event.target as Element;
-    if (target.closest('button, input, select, [data-graph-control]')) return;
-    event.currentTarget.setPointerCapture(event.pointerId);
+    if (target.closest('[data-graph-control]')) return;
+    const captureTarget = target.closest<HTMLElement>('[data-graph-node]') ?? event.currentTarget;
+    captureTarget.setPointerCapture(event.pointerId);
     dragRef.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
@@ -182,10 +195,18 @@ export const Graph: React.FC = () => {
     }
   };
 
-  const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+  const handleWheel = useCallback((event: WheelEvent) => {
     event.preventDefault();
+    event.stopPropagation();
     handleZoom(event.deltaY > 0 ? -0.1 : 0.1);
-  };
+  }, [handleZoom]);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    viewport.addEventListener('wheel', handleWheel, { passive: false });
+    return () => viewport.removeEventListener('wheel', handleWheel);
+  }, [handleWheel]);
 
   const handleNodeClick = useCallback((sha: string) => {
     if (selectedCommit?.id === sha) {
@@ -233,7 +254,6 @@ export const Graph: React.FC = () => {
         onPointerMove={handlePointerMove}
         onPointerUp={stopDragging}
         onPointerCancel={stopDragging}
-        onWheel={handleWheel}
         aria-label="Область графа коммитов"
       >
         <div

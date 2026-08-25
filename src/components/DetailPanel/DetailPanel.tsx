@@ -17,6 +17,7 @@ import { useApp } from '../../context/AppContext';
 import { CommitFileChange } from '../../types';
 import { getDiffLineKind } from '../../lib/commitDetails';
 import { MoreMenu } from '../common/MoreMenu';
+import { MarkdownInline, MarkdownRenderer } from '../common/MarkdownRenderer';
 
 const FILE_STATUS: Record<string, { label: string; symbol: string; className: string }> = {
   added: { label: 'Добавлен', symbol: '+', className: 'text-[var(--diff-add-ink)] bg-[var(--diff-add-bg)]' },
@@ -125,7 +126,10 @@ export const DetailPanel: React.FC = () => {
   if (!selectedCommit) return null;
 
   const fullMessage = selectedCommit.text || selectedCommit.label;
-  const shortMessage = fullMessage.split('\n')[0];
+  const messageLines = fullMessage.split(/\r?\n/);
+  const shortMessage = messageLines[0] || fullMessage;
+  const messageBody = messageLines.slice(1).join('\n').replace(/^\n/, '');
+  const displayTitle = shortMessage.replace(/^ {0,3}#{1,6}[ \t]+/, '');
   const files = selectedCommit.filesChanged || [];
   const totalChanges = selectedCommit.plus + selectedCommit.minus;
 
@@ -200,10 +204,10 @@ export const DetailPanel: React.FC = () => {
         <details open className="group/section mt-3" data-detail-section="message">
           <summary className="flex cursor-pointer list-none items-start gap-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-[var(--sage)]">
             <ChevronRight size={16} className="mt-1 flex-none text-[var(--muted)] transition-transform group-open/section:rotate-90" aria-hidden="true" />
-            <h2 className="text-lg font-semibold tracking-tight leading-tight break-words">{shortMessage}</h2>
+            <h2 className="text-lg font-semibold tracking-tight leading-tight break-words"><MarkdownInline content={displayTitle} /></h2>
           </summary>
-          {fullMessage !== shortMessage && (
-            <p className="ml-6 mt-2 text-xs text-[var(--muted)] leading-relaxed whitespace-pre-line break-words">{fullMessage}</p>
+          {messageBody.trim() && (
+            <MarkdownRenderer content={messageBody} className="ml-6 mt-2 text-xs leading-relaxed text-[var(--muted)]" />
           )}
         </details>
 

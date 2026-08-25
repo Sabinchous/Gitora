@@ -166,7 +166,7 @@ async function githubFetch(endpoint, options = {}) {
 
 const server = new McpServer({
   name: 'gitora',
-  version: '0.2.0',
+  version: '0.2.2',
 });
 
 server.prompt(

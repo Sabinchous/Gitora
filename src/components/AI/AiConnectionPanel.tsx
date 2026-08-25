@@ -1,15 +1,40 @@
-import React, { useState } from 'react';
-import { AlertCircle, Bot, CheckCircle2, Copy, RefreshCw } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { AlertCircle, Bot, CheckCircle2, Clock3, Copy, RefreshCw, ShieldCheck, ShieldOff } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { McpWriteDuration } from '../../types';
+
+const MCP_WRITE_OPTIONS: Array<{ duration: McpWriteDuration; label: string; description: string }> = [
+  { duration: '10m', label: '10 минут', description: 'Для одной задачи' },
+  { duration: '30m', label: '30 минут', description: 'Для короткой сессии' },
+  { duration: '1h', label: '1 час', description: 'Для длительной работы' },
+  { duration: 'forever', label: 'Бессрочно', description: 'До закрытия Gitora' },
+];
+
+function formatRemaining(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes === 0) return `${seconds} с`;
+  return `${minutes} мин ${String(seconds).padStart(2, '0')} с`;
+}
 
 export const AiConnectionPanel: React.FC = () => {
   const {
     aiStatus,
+    allowMcpWrites,
+    revokeMcpWrites,
     restartMcp,
     notify,
   } = useApp();
   const [connectionState, setConnectionState] = useState<'idle' | 'checking' | 'ready' | 'error'>('idle');
   const [connectionError, setConnectionError] = useState('');
+  const [writeAction, setWriteAction] = useState<McpWriteDuration | 'revoke' | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const checkConnection = async () => {
     setConnectionState('checking');
@@ -55,6 +80,27 @@ export const AiConnectionPanel: React.FC = () => {
   };
 
   const template = aiStatus.configTemplate;
+  const expiresAt = aiStatus.mcpWritesExpiresAt ? Date.parse(aiStatus.mcpWritesExpiresAt) : null;
+  const writesActive = aiStatus.mcpWritesAllowed && (expiresAt === null || expiresAt > now);
+  const remaining = writesActive && expiresAt !== null ? formatRemaining(expiresAt - now) : '';
+
+  const grantWriteAccess = async (duration: McpWriteDuration) => {
+    setWriteAction(duration);
+    try {
+      await allowMcpWrites(duration);
+    } finally {
+      setWriteAction(null);
+    }
+  };
+
+  const revokeWriteAccess = async () => {
+    setWriteAction('revoke');
+    try {
+      await revokeMcpWrites();
+    } finally {
+      setWriteAction(null);
+    }
+  };
 
   return (
     <section className="space-y-5" data-ai-connection-panel aria-labelledby="ai-connection-title">
@@ -101,6 +147,60 @@ export const AiConnectionPanel: React.FC = () => {
               <AlertCircle size={14} className="mt-0.5 flex-none" />
               <span>🔴 Ошибка: {connectionError}</span>
             </div>
+          )}
+        </div>
+
+        <div className="mt-4 rounded-xl border border-[var(--line)] bg-[var(--surface-soft)] p-3" data-mcp-write-controls>
+          <div className="flex items-start gap-3">
+            <span className="grid h-9 w-9 flex-none place-items-center rounded-lg bg-[var(--surface)] text-[var(--muted)]">
+              <Clock3 size={17} />
+            </span>
+            <div className="min-w-0 flex-1">
+              <h4 className="text-xs font-bold">Разрешение записи MCP</h4>
+              <p className="mt-1 text-xs leading-relaxed text-[var(--muted)]">
+                Разрешает только изменения в GitHub через MCP. Чтение доступно всегда.
+              </p>
+            </div>
+          </div>
+
+          <div className={`mt-3 flex items-start gap-2 rounded-lg p-3 text-xs ${writesActive ? 'bg-[rgba(93,118,89,.12)] text-[#5D7659]' : 'bg-[var(--surface)] text-[var(--muted)]'}`} aria-live="polite">
+            {writesActive ? <ShieldCheck size={15} className="mt-0.5 flex-none" /> : <ShieldOff size={15} className="mt-0.5 flex-none" />}
+            <div>
+              <p className="font-semibold">{writesActive ? 'Запись MCP разрешена' : 'Запись MCP запрещена'}</p>
+              <p className="mt-0.5">
+                {writesActive
+                  ? expiresAt === null ? 'Бессрочно до закрытия Gitora' : `Осталось ${remaining}`
+                  : 'Выберите срок действия ниже'}
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-3 grid grid-cols-2 gap-2" role="group" aria-label="Срок разрешения записи MCP">
+            {MCP_WRITE_OPTIONS.map(option => (
+              <button
+                key={option.duration}
+                type="button"
+                aria-pressed={writesActive && aiStatus.mcpWritesDuration === option.duration}
+                className={`min-h-10 rounded-lg border px-3 py-2 text-left text-xs font-semibold transition-[background-color,color,transform,box-shadow] active:scale-[0.96] disabled:cursor-wait disabled:opacity-50 ${writesActive && aiStatus.mcpWritesDuration === option.duration ? 'border-[#5D7659] bg-[rgba(93,118,89,.12)] text-[#5D7659] shadow-sm' : 'border-[var(--line)] bg-[var(--surface)] text-[var(--ink)] hover:bg-[var(--surface-soft)]'}`}
+                onClick={() => void grantWriteAccess(option.duration)}
+                disabled={writeAction !== null}
+              >
+                <span className="block">{option.label}</span>
+                <span className="mt-0.5 block text-[11px] font-normal text-[var(--muted)]">{option.description}</span>
+              </button>
+            ))}
+          </div>
+
+          {writesActive && (
+            <button
+              type="button"
+              className="mt-2 flex min-h-10 w-full items-center justify-center gap-1.5 rounded-lg border border-[var(--line)] bg-[var(--surface)] px-3 text-xs font-semibold text-[var(--ink)] transition-[background-color,color,transform] hover:bg-[var(--surface-soft)] active:scale-[0.96] disabled:cursor-wait disabled:opacity-50"
+              onClick={() => void revokeWriteAccess()}
+              disabled={writeAction !== null}
+            >
+              <ShieldOff size={14} />
+              {writeAction === 'revoke' ? 'Отзываем разрешение…' : 'Отозвать разрешение'}
+            </button>
           )}
         </div>
       </div>

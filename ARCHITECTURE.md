@@ -146,8 +146,14 @@ GitHub REST API
 
 ```text
 AppContext → computeGraphLayout → Graph → CommitNode
-AppContext → ProjectList / DetailPanel / PR / Issue / Modal components
+AppContext → ProjectList / DetailPanel / PR / Issue / Team / Modal components
 ```
+
+Team использует отдельный кэш по `project.id`: списки collaborators, invitations,
+contributors и contributor statistics загружаются только при открытии вкладки или
+явном refresh. Профили пользователей и история выбранного автора кэшируются
+отдельно. Мутации доступа проходят через `electron:main` и требуют
+`Administration: write`; renderer не формирует GitHub REST-запросы самостоятельно.
 
 Контракт между слоями описан в `src/types/index.ts` и должен совпадать с объектом, который публикует `electron/preload.cjs`.
 
@@ -200,6 +206,14 @@ AppContext → ProjectList / DetailPanel / PR / Issue / Modal components
 Поля: идентификаторы, номер, заголовок, тело, состояние, пользователь, ветки/labels, даты, URL.
 
 Связи: списки загружаются через context, детали открываются в UI; GitHub issue с `pull_request` фильтруются из списка issues.
+
+Название: `GitHubCollaborator` / `GitHubInvitation` / `GitHubContributor`
+
+Назначение: раздел Team разделяет право доступа к репозиторию и фактический вклад в историю коммитов.
+
+Поля: GitHub `login`, avatar/URL, permission или role для доступа; contributions и optional statistics для авторов.
+
+Связи: collaborator и contributor сопоставляются только точным совпадением `login`; anonymous contributors остаются без профиля и переходов.
 
 Название: `Release`, `ReleaseAsset`, `CreateReleaseInput`
 

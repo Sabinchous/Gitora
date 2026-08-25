@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { Download, ExternalLink, Package, X } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { displayVersion, isSameVersion, sortReleasesByVersion } from '../../lib/version';
 
 function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} Б`;
@@ -26,6 +27,7 @@ export const UpdatesModal: React.FC = () => {
     notify,
   } = useApp();
   const [closing, setClosing] = useState(false);
+  const sortedReleases = useMemo(() => sortReleasesByVersion(releases), [releases]);
 
   if (!updatesOpen) return null;
 
@@ -74,9 +76,9 @@ export const UpdatesModal: React.FC = () => {
               Загрузка списка версий...
             </p>
           ) : (
-            releases.map((release) => {
+            sortedReleases.map((release) => {
               const exeAsset = release.assets.find(a => a.name.endsWith('.exe'));
-              const isCurrentVersion = release.tag === `v${currentVersion}` || release.tag === currentVersion;
+              const isCurrentVersion = isSameVersion(release.tag, currentVersion);
 
               return (
                 <div
@@ -86,7 +88,7 @@ export const UpdatesModal: React.FC = () => {
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">
                       <div className="flex items-center gap-2">
-                        <h3 className="font-bold text-sm">{release.name || release.tag}</h3>
+                        <h3 className="font-bold text-sm">{release.name || `Gitora ${displayVersion(release.tag)}`}</h3>
                         {isCurrentVersion && (
                           <span className="text-xs font-bold bg-[#AEA989] text-[#261732] px-2 py-0.5 rounded-full">
                             ТЕКУЩАЯ
@@ -150,7 +152,7 @@ export const UpdatesModal: React.FC = () => {
         <div className="px-6 py-4 border-t border-[rgba(38,23,50,.12)]">
           <button
             className="w-full h-10 border border-[rgba(38,23,50,.12)] rounded-lg text-xs font-semibold flex items-center justify-center gap-2 hover:bg-[#F3EFE9]"
-            onClick={() => window.open('https://github.com/Appappars/Gitora/releases', '_blank')}
+            onClick={() => window.open('https://github.com/Sabinchous/Gitora/releases', '_blank')}
           >
             <ExternalLink size={14} />
             Все релизы на GitHub

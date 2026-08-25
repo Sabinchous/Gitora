@@ -1,14 +1,39 @@
 import React, { useEffect, useState } from 'react';
 import { Check, FolderGit2, FolderOpen, Github, Trash2, X } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
-import { UploadFolderSummary } from '../../types';
+import { CreateRepositoryOptions, UploadFolderSummary } from '../../types';
 import { MarkdownEditor } from '../common/MarkdownEditor';
+import { SelectMenu } from '../common/SelectMenu';
+
+const GITIGNORE_OPTIONS = [
+  { value: '', label: 'Нет .gitignore' },
+  { value: 'Node', label: 'Node' },
+  { value: 'Python', label: 'Python' },
+  { value: 'React', label: 'React' },
+  { value: 'VisualStudioCode', label: 'Visual Studio Code' },
+  { value: 'Go', label: 'Go' },
+  { value: 'Java', label: 'Java' },
+  { value: 'Rust', label: 'Rust' },
+  { value: 'Swift', label: 'Swift' },
+];
+
+const LICENSE_OPTIONS = [
+  { value: '', label: 'Нет лицензии' },
+  { value: 'mit', label: 'MIT' },
+  { value: 'apache-2.0', label: 'Apache 2.0' },
+  { value: 'gpl-3.0', label: 'GPL-3.0' },
+  { value: 'mpl-2.0', label: 'MPL-2.0' },
+  { value: 'unlicense', label: 'Unlicense' },
+];
 
 export const CreateModal: React.FC = () => {
   const { setCreateOpen, createRepo, loading, selectUploadFolder, clearUploadFolder } = useApp();
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [isPrivate, setIsPrivate] = useState(true);
+  const [autoInit, setAutoInit] = useState(true);
+  const [gitignoreTemplate, setGitignoreTemplate] = useState('');
+  const [licenseTemplate, setLicenseTemplate] = useState('');
   const [folderSummary, setFolderSummary] = useState<UploadFolderSummary | null>(null);
 
   const handleSelectFolder = async () => {
@@ -61,7 +86,12 @@ export const CreateModal: React.FC = () => {
 
         <form onSubmit={async (event) => {
           event.preventDefault();
-          const result = await createRepo(name.trim(), description.trim(), isPrivate, folderSummary?.path);
+          const options: CreateRepositoryOptions = {
+            autoInit,
+            ...(gitignoreTemplate ? { gitignoreTemplate } : {}),
+            ...(licenseTemplate ? { licenseTemplate } : {}),
+          };
+          const result = await createRepo(name.trim(), description.trim(), isPrivate, folderSummary?.path, options);
           if (result) setCreateOpen(false);
         }}>
           <label className="block text-xs font-bold">
@@ -149,6 +179,66 @@ export const CreateModal: React.FC = () => {
                   {value ? 'Приватный' : 'Публичный'}
                 </button>
               ))}
+            </div>
+          </fieldset>
+
+          <fieldset className="mt-5">
+            <legend className="text-xs font-bold">Конфигурация</legend>
+            <div className="mt-2 overflow-hidden rounded-xl border border-[rgba(38,23,50,.12)] bg-[#F3EFE9]">
+              <div className="flex items-center justify-between gap-3 p-3">
+                <div className="min-w-0">
+                  <div className="text-xs font-bold">Добавить README</div>
+                  <p className="mt-1 text-xs leading-relaxed text-[#7D7482]">Создать первый commit с файлом README.md.</p>
+                </div>
+                <div className="flex flex-none items-center gap-2">
+                  <span className="text-xs text-[#7D7482]">{autoInit ? 'Вкл.' : 'Выкл.'}</span>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={autoInit}
+                    aria-label="Добавить README"
+                    data-create-readme
+                    onClick={() => setAutoInit(current => !current)}
+                    className={`relative h-6 w-11 flex-none rounded-full border transition-colors ${autoInit ? 'border-[#AEA989] bg-[#AEA989]' : 'border-[rgba(38,23,50,.2)] bg-white'}`}
+                  >
+                    <span className={`absolute left-1 top-1 h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${autoInit ? 'translate-x-5' : ''}`} />
+                  </button>
+                </div>
+              </div>
+
+              <div className="border-t border-[rgba(38,23,50,.1)] p-3">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0">
+                    <div className="text-xs font-bold">Добавить .gitignore</div>
+                    <p className="mt-1 text-xs leading-relaxed text-[#7D7482]">Файлы, которые Git не будет отслеживать.</p>
+                  </div>
+                  <div className="w-full flex-none sm:w-44">
+                    <SelectMenu
+                      value={gitignoreTemplate}
+                      options={GITIGNORE_OPTIONS}
+                      onChange={setGitignoreTemplate}
+                      ariaLabel="Шаблон .gitignore"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="border-t border-[rgba(38,23,50,.1)] p-3">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0">
+                    <div className="text-xs font-bold">Добавить лицензию</div>
+                    <p className="mt-1 text-xs leading-relaxed text-[#7D7482]">Условия использования и распространения кода.</p>
+                  </div>
+                  <div className="w-full flex-none sm:w-44">
+                    <SelectMenu
+                      value={licenseTemplate}
+                      options={LICENSE_OPTIONS}
+                      onChange={setLicenseTemplate}
+                      ariaLabel="Шаблон лицензии"
+                    />
+                  </div>
+                </div>
+              </div>
             </div>
           </fieldset>
 

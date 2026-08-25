@@ -10,6 +10,10 @@ const {
   isValidGitSha,
   isValidGitRef,
   isValidCommitLimit,
+  isValidGitHubUsername,
+  isValidInvitationId,
+  isValidCollaboratorPermission,
+  githubTeamState,
 } = require('./githubErrors.cjs');
 
 describe('githubErrorMessage', () => {
@@ -19,6 +23,21 @@ describe('githubErrorMessage', () => {
 
   it('keeps normal GitHub messages unchanged', () => {
     expect(githubErrorMessage(404, 'Not Found')).toBe('Not Found');
+  });
+
+  it('turns Team API failures into actionable messages', () => {
+    expect(githubErrorMessage(403, 'forbidden', '/repos/me/demo/collaborators')).toContain('Administration: write');
+    expect(githubErrorMessage(403, 'forbidden', '/repos/me/demo/collaborators/alex', 'DELETE')).toContain('Administration: write');
+    expect(githubErrorMessage(404, 'Not Found', '/repos/me/demo/invitations/42')).toContain('Приглашение не найдено');
+    expect(githubErrorMessage(422, 'User is already a collaborator', '/repos/me/demo/collaborators/alex', 'PUT')).toContain('уже имеет доступ');
+    expect(githubErrorMessage(202, '', '/repos/me/demo/stats/contributors')).toContain('рассчитывает статистику');
+  });
+
+  it('turns Pull Request failures into safe next steps', () => {
+    expect(githubErrorMessage(403, 'forbidden', '/repos/me/demo/pulls/7/reviews', 'POST')).toContain('Pull requests: write');
+    expect(githubErrorMessage(403, 'forbidden', '/repos/me/demo/pulls/7/merge', 'PUT')).toContain('Contents: write');
+    expect(githubErrorMessage(409, 'conflict', '/repos/me/demo/pulls/7/merge', 'PUT')).toContain('конфликт');
+    expect(githubErrorMessage(405, 'method not allowed', '/repos/me/demo/pulls/7/merge', 'PUT')).toContain('не может объединить');
   });
 });
 
@@ -30,6 +49,7 @@ describe('githubErrorCode', () => {
   it('classifies repository permission failures', () => {
     expect(githubErrorCode(403, 'Resource not accessible by personal access token', '/user/repos')).toBe('permissions');
     expect(githubErrorCode(403, 'Resource not accessible by integration', '/repos/me/demo/contents/hello.py')).toBe('permissions');
+    expect(githubErrorCode(403, 'Resource not accessible by integration', '/repos/me/demo/pulls/7/merge')).toBe('permissions');
   });
 
   it('classifies GitHub service failures', () => {
@@ -81,5 +101,24 @@ describe('IPC path input validators', () => {
     expect(isValidCommitLimit(24)).toBe(false);
     expect(isValidCommitLimit(101)).toBe(false);
     expect(isValidCommitLimit('50')).toBe(false);
+  });
+
+  it('validates Team identifiers and permissions', () => {
+    expect(isValidGitHubUsername('octocat')).toBe(true);
+    expect(isValidGitHubUsername('bad/name')).toBe(false);
+    expect(isValidGitHubUsername('ends-')).toBe(false);
+    expect(isValidInvitationId(42)).toBe(true);
+    expect(isValidInvitationId('0')).toBe(false);
+    expect(isValidCollaboratorPermission('maintain')).toBe(true);
+    expect(isValidCollaboratorPermission('owner')).toBe(false);
+  });
+
+  it('keeps Team HTTP states explicit instead of treating protected data as empty', () => {
+    expect(githubTeamState(202)).toBe('pending');
+    expect(githubTeamState(204)).toBe('empty');
+    expect(githubTeamState(403)).toBe('forbidden');
+    expect(githubTeamState(404)).toBe('error');
+    expect(githubTeamState(422)).toBe('error');
+    expect(githubTeamState(200, [{ login: 'octocat' }])).toBe('loaded');
   });
 });

@@ -1,5 +1,5 @@
 import React, { forwardRef, useRef, useState } from 'react';
-import { Bold, Code2, Italic, List, Quote } from 'lucide-react';
+import { Bold, Code2, Heading2, Italic, List, Quote } from 'lucide-react';
 
 export interface MarkdownEditorProps extends Omit<React.TextareaHTMLAttributes<HTMLTextAreaElement>, 'value' | 'onChange'> {
   value: string;
@@ -115,6 +115,17 @@ export const MarkdownEditor = forwardRef<HTMLTextAreaElement, MarkdownEditorProp
           </button>
         ))}
         <span className="mx-1 h-5 w-px bg-[var(--line)]" aria-hidden="true" />
+        <button
+          type="button"
+          className="grid h-8 w-8 place-items-center rounded-md text-[var(--muted)] hover:bg-[var(--surface-strong)] hover:text-[var(--ink)] active:scale-[0.96]"
+          aria-label="Заголовок 2-го уровня"
+          title="Заголовок 2-го уровня"
+          onMouseDown={event => event.preventDefault()}
+          onClick={() => insertPrefix('## ')}
+          disabled={disabled}
+        >
+          <Heading2 size={15} aria-hidden="true" />
+        </button>
         <button
           type="button"
           className="grid h-8 w-8 place-items-center rounded-md text-[var(--muted)] hover:bg-[var(--surface-strong)] hover:text-[var(--ink)] active:scale-[0.96]"

@@ -26,6 +26,11 @@ describe('GitHub authentication diagnostics', () => {
     expect(githubWriteRequirement('POST', '/repos/demo/test/issues')).toBe('Issues: write');
     expect(githubWriteRequirement('POST', '/repos/demo/test/issues/4/comments')).toBe('Issues: write or Pull requests: write');
     expect(githubWriteRequirement('POST', '/repos/demo/test/pulls')).toBe('Pull requests: write');
+    expect(githubWriteRequirement('POST', '/repos/demo/test/pulls/4/reviews')).toBe('Pull requests: write');
+    expect(githubWriteRequirement('PATCH', '/repos/demo/test/pulls/4')).toBe('Pull requests: write');
+    expect(githubWriteRequirement('PUT', '/repos/demo/test/pulls/4/merge')).toBe('Contents: write');
+    expect(githubWriteRequirement('PUT', '/repos/demo/test/collaborators/alex')).toBe('Administration: write');
+    expect(githubWriteRequirement('DELETE', '/repos/demo/test/invitations/42')).toBe('Administration: write');
     expect(githubWriteRequirement('GET', '/repos/demo/test')).toBe('');
   });
 
@@ -38,12 +43,13 @@ describe('GitHub authentication diagnostics', () => {
 
   it('reports available, missing, and unknown repository permissions', () => {
     const checks = buildGitHubPermissionChecks({
-      permissions: { push: true, pull: true },
+      permissions: { push: true, pull: true, admin: false },
       acceptedPermissions: { contents: 'write', issues: 'read' },
     });
     expect(checks.find(check => check.permission === 'Contents: write')).toMatchObject({ status: 'available' });
     expect(checks.find(check => check.permission === 'Issues: write')).toMatchObject({ status: 'missing' });
     expect(checks.find(check => check.permission === 'Pull requests: write')).toMatchObject({ status: 'unknown' });
     expect(checks.find(check => check.permission === 'Metadata: read')).toMatchObject({ status: 'available' });
+    expect(checks.find(check => check.permission === 'Administration: write')).toMatchObject({ status: 'missing' });
   });
 });

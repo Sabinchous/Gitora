@@ -8,15 +8,16 @@ import { SelectMenu } from '../common/SelectMenu';
 interface CreatePRModalProps {
   branches: Branch[];
   repoFullName: string;
+  defaultBranch: string;
 }
 
-export const CreatePRModal: React.FC<CreatePRModalProps> = ({ branches, repoFullName }) => {
+export const CreatePRModal: React.FC<CreatePRModalProps> = ({ branches, repoFullName, defaultBranch }) => {
   const { setPrOpen, createPullRequest, loading } = useApp();
   const [owner, repo] = repoFullName.split('/');
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
   const [head, setHead] = useState('');
-  const [base, setBase] = useState('main');
+  const [base, setBase] = useState(defaultBranch);
 
   useEffect(() => {
     const close = (event: KeyboardEvent) => {
@@ -117,7 +118,7 @@ export const CreatePRModal: React.FC<CreatePRModalProps> = ({ branches, repoFull
             </button>
             <button
               type="submit"
-              disabled={!title.trim() || !head || loading}
+              disabled={!title.trim() || !head || !base || head === base || loading}
               className="px-4 py-2 bg-[#261732] text-[#E7E0D6] rounded-lg text-sm font-semibold flex items-center justify-center gap-2 disabled:opacity-40"
             >
               <GitPullRequest size={16} />

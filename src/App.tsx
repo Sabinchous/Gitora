@@ -18,6 +18,7 @@ import {
   Pencil,
   Plus,
   RefreshCw,
+  Users,
 } from 'lucide-react';
 import { useApp } from './context/AppContext';
 import { Sidebar } from './components/Sidebar/Sidebar';
@@ -27,6 +28,7 @@ import { PRList } from './components/PR/PRList';
 import { PRDetail } from './components/PR/PRDetail';
 import { IssueList } from './components/Issue/IssueList';
 import { IssueDetail } from './components/Issue/IssueDetail';
+import { TeamPanel } from './components/Team/TeamPanel';
 import { SearchBar } from './components/Search/SearchBar';
 import { CreateModal } from './components/Modal/CreateModal';
 import { EditModal } from './components/Modal/EditModal';
@@ -42,6 +44,7 @@ import { UpdatesModal } from './components/Modal/UpdatesModal';
 import { ConnectionErrorPanel } from './components/common/ConnectionErrorPanel';
 import { MoreMenu } from './components/common/MoreMenu';
 import { Toast } from './components/common/Toast';
+import { UpdateNotice } from './components/common/UpdateNotice';
 
 export const App: React.FC = () => {
   const {
@@ -79,8 +82,9 @@ export const App: React.FC = () => {
     syncAllData,
   } = useApp();
 
-  const [activeTab, setActiveTab] = useState<'graph' | 'pr' | 'issues'>('graph');
+  const [activeTab, setActiveTab] = useState<'graph' | 'pr' | 'issues' | 'team'>('graph');
   const [graphVisible, setGraphVisible] = useState(true);
+  const [graphAuthorFocus, setGraphAuthorFocus] = useState('');
   const [branchStartTab, setBranchStartTab] = useState<'list' | 'create'>('list');
 
   const copyRepositoryUrl = async () => {
@@ -131,6 +135,8 @@ export const App: React.FC = () => {
               : '??'}
           </button>
         </header>
+
+        <UpdateNotice />
 
         {!connected ? (
           <div className="flex-1 flex items-center justify-center p-6">
@@ -275,6 +281,7 @@ export const App: React.FC = () => {
                   <button
                     className={`px-3 py-1.5 rounded-lg text-xs font-semibold ${activeTab === 'pr' ? 'bg-[#261732] text-[#E7E0D6]' : 'text-[#7D7482] hover:bg-[#F3EFE9]'}`}
                     onClick={() => setActiveTab('pr')}
+                    data-pr-tab
                   >
                     <GitPullRequest size={14} className="inline mr-1.5" />
                     Pull Requests
@@ -285,6 +292,14 @@ export const App: React.FC = () => {
                   >
                     <CircleDot size={14} className="inline mr-1.5" />
                     Задачи
+                  </button>
+                  <button
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold ${activeTab === 'team' ? 'bg-[#261732] text-[#E7E0D6]' : 'text-[#7D7482] hover:bg-[#F3EFE9]'}`}
+                    onClick={() => setActiveTab('team')}
+                    data-team-tab
+                  >
+                    <Users size={14} className="inline mr-1.5" />
+                    Team
                   </button>
                 </div>
                 {activeTab === 'graph' && (
@@ -306,7 +321,7 @@ export const App: React.FC = () => {
                   graphVisible ? (
                   <>
                     <div className="flex-1 min-w-0 min-h-0 overflow-auto">
-                      <Graph />
+                      <Graph focusAuthor={graphAuthorFocus} onAuthorFocusApplied={() => setGraphAuthorFocus('')} />
                     </div>
                     <DetailPanel />
                   </>
@@ -336,13 +351,21 @@ export const App: React.FC = () => {
                     </div>
                     <PRDetail />
                   </>
-                ) : (
+                ) : activeTab === 'issues' ? (
                   <>
                     <div className="flex-1 min-w-0 overflow-auto">
                       <IssueList owner={project.repo.split('/')[0]} repo={project.repo.split('/')[1]} />
                     </div>
                     <IssueDetail />
                   </>
+                ) : (
+                  <TeamPanel
+                    onShowCommits={login => {
+                      setGraphAuthorFocus(login);
+                      setGraphVisible(true);
+                      setActiveTab('graph');
+                    }}
+                  />
                 )}
               </div>
             </section>
@@ -372,6 +395,7 @@ export const App: React.FC = () => {
         <CreatePRModal
           branches={branches}
           repoFullName={project.repo}
+          defaultBranch={project.defaultBranch}
         />
       )}
       {issueOpen && project && (

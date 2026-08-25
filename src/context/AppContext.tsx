@@ -12,21 +12,32 @@ import {
   AiClientSetupResult,
   AiConnectionStatus,
   AiDiagnosticsResult,
+  McpWriteDuration,
   McpWriteStatus,
   Branch,
   Commit,
   CommitDetails,
   CommitResult,
+  CreateRepositoryOptions,
   CreateReleaseInput,
   CreateRepositoryResult,
   DownloadOptions,
   FolderChangesSummary,
   GitFolderChangesSummary,
   GitHubCommit,
+  GitHubCollaborator,
+  GitHubCollaboratorPermission,
+  GitHubContributor,
+  GitHubContributorStatistics,
+  GitHubInvitation,
   GitHubIssue,
+  GitHubTeamList,
   GitHubPR,
+  GitHubPRFile,
   GitHubRepo,
   GitHubUser,
+  GitHubApiResult,
+  TeamLoadState,
   Project,
   Release,
   ReleaseAssetSelection,
@@ -64,6 +75,7 @@ interface AppState {
   commits: Commit[];
   branches: Branch[];
   repositoryEmpty: boolean;
+  repositoryInfo: GitHubRepo | null;
   user: GitHubUser | null;
   connected: boolean;
   loading: boolean;
@@ -77,7 +89,28 @@ interface AppState {
   aiStatus: AiConnectionStatus;
   aiDiagnostics: AiDiagnosticsResult | null;
   aiDiagnosticsLoading: boolean;
+  teamCollaborators: TeamResource<GitHubCollaborator>;
+  teamInvitations: TeamResource<GitHubInvitation>;
+  teamContributors: TeamResource<GitHubContributor>;
+  teamStats: TeamResource<GitHubContributorStatistics>;
 }
+
+export interface TeamResource<T> {
+  state: TeamLoadState;
+  items: T[];
+  error?: string;
+  status?: number;
+}
+
+interface TeamCacheEntry {
+  collaborators: TeamResource<GitHubCollaborator>;
+  invitations: TeamResource<GitHubInvitation>;
+  contributors: TeamResource<GitHubContributor>;
+  stats: TeamResource<GitHubContributorStatistics>;
+  timelines: Map<string, TeamResource<GitHubCommit>>;
+}
+
+type TeamResourceKey = 'collaborators' | 'invitations' | 'contributors' | 'stats';
 
 interface AppContextType extends AppState {
   setProject: (project: Project | null) => void;
@@ -98,7 +131,7 @@ interface AppContextType extends AppState {
   login: (token: string) => Promise<void>;
   clearConnectionError: () => void;
   logout: () => Promise<void>;
-  createRepo: (name: string, description: string, isPrivate: boolean, folderPath?: string) => Promise<CreateRepositoryResult | null>;
+  createRepo: (name: string, description: string, isPrivate: boolean, folderPath?: string, options?: CreateRepositoryOptions) => Promise<CreateRepositoryResult | null>;
   deleteRepo: (owner: string, repo: string) => Promise<boolean>;
   updateRepo: (owner: string, repo: string, data: { name?: string; description?: string; private?: boolean }) => Promise<boolean>;
   createBranch: (owner: string, repo: string, name: string, fromSha: string) => Promise<boolean>;
@@ -106,12 +139,18 @@ interface AppContextType extends AppState {
   renameBranch: (owner: string, repo: string, branch: string, newName: string) => Promise<boolean>;
   updateBranchVisualSettings: (branchName: string, changes: { color?: string; direction?: BranchDirection }) => void;
   pullRequests: GitHubPR[];
+  pullRequestsLoading: boolean;
+  pullRequestsError: string | null;
   selectedPR: GitHubPR | null;
   setSelectedPR: (pr: GitHubPR | null) => void;
   prOpen: boolean;
   setPrOpen: (open: boolean) => void;
   loadPullRequests: (owner: string, repo: string, state?: 'open' | 'closed' | 'all') => Promise<void>;
   getPullRequest: (owner: string, repo: string, number: number) => Promise<GitHubPR | null>;
+  getPullRequestFiles: (owner: string, repo: string, number: number) => Promise<GitHubPRFile[] | null>;
+  approvePullRequest: (owner: string, repo: string, number: number) => Promise<boolean>;
+  mergePullRequest: (owner: string, repo: string, number: number, sha?: string) => Promise<boolean>;
+  updatePullRequestState: (owner: string, repo: string, number: number, state: 'open' | 'closed') => Promise<boolean>;
   createPullRequest: (owner: string, repo: string, title: string, body: string, head: string, base: string) => Promise<boolean>;
   issues: GitHubIssue[];
   selectedIssue: GitHubIssue | null;
@@ -141,12 +180,20 @@ interface AppContextType extends AppState {
   downloadArchive: (owner: string, repo: string, sha: string) => Promise<string | null>;
   refreshRepositoryData: () => Promise<boolean>;
   syncAllData: () => Promise<boolean>;
+  loadTeam: (force?: boolean) => Promise<void>;
+  refreshTeam: () => Promise<void>;
+  loadTeamContributorTimeline: (login: string) => Promise<TeamResource<GitHubCommit>>;
+  loadTeamProfile: (login: string) => Promise<GitHubUser | null>;
+  addTeamCollaborator: (owner: string, repo: string, login: string, permission: GitHubCollaboratorPermission) => Promise<boolean>;
+  updateTeamCollaborator: (owner: string, repo: string, login: string, permission: GitHubCollaboratorPermission) => Promise<boolean>;
+  removeTeamCollaborator: (owner: string, repo: string, login: string) => Promise<boolean>;
+  cancelTeamInvitation: (owner: string, repo: string, invitationId: number) => Promise<boolean>;
   refreshAiStatus: () => Promise<AiConnectionStatus | null>;
   runAiDiagnostics: () => Promise<AiDiagnosticsResult | null>;
   configureAiClient: (client: AiClientId) => Promise<AiClientSetupResult | null>;
   disconnectAiClient: (client: AiClientId) => Promise<AiClientStatus | null>;
   restartMcp: () => Promise<AiConnectionStatus | null>;
-  allowMcpWrites: () => Promise<McpWriteStatus | null>;
+  allowMcpWrites: (duration: McpWriteDuration) => Promise<McpWriteStatus | null>;
   revokeMcpWrites: () => Promise<McpWriteStatus | null>;
 }
 
@@ -197,6 +244,13 @@ const AI_TOOL_NAMES = [
   ['create_git_branch', 'Создать ветку', 'Создаёт ветку от SHA коммита.', false],
   ['update_git_branch', 'Переместить ветку', 'Перемещает ветку на другой SHA без force push.', false],
 ] as const;
+
+const MCP_WRITE_DURATION_LABELS: Record<McpWriteDuration, string> = {
+  '10m': '10 минут',
+  '30m': '30 минут',
+  '1h': '1 час',
+  forever: 'бессрочно',
+};
 
 const DEFAULT_AI_STATUS: AiConnectionStatus = {
   level: 'not_configured',
@@ -272,6 +326,36 @@ function mapCommits(data: GitHubCommit[], layout: GraphLayoutResult): Commit[] {
   });
 }
 
+function emptyTeamResource<T>(): TeamResource<T> {
+  return { state: 'idle', items: [] };
+}
+
+function teamResourceFromResult<T>(result?: GitHubApiResult<GitHubTeamList<T>>): TeamResource<T> {
+  if (result?.success && result.data) {
+    return {
+      state: result.data.state,
+      items: Array.isArray(result.data.items) ? result.data.items : [],
+      status: result.status,
+    };
+  }
+  return {
+    state: result?.status === 403 || result?.errorCode === 'permissions' ? 'forbidden' : 'error',
+    items: [],
+    error: result?.error || 'Не удалось загрузить данные Team',
+    status: result?.status,
+  };
+}
+
+function createTeamCacheEntry(): TeamCacheEntry {
+  return {
+    collaborators: emptyTeamResource(),
+    invitations: emptyTeamResource(),
+    contributors: emptyTeamResource(),
+    stats: emptyTeamResource(),
+    timelines: new Map(),
+  };
+}
+
 export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [project, setProject] = useState<Project | null>(null);
   const [selectedCommit, setSelectedCommit] = useState<Commit | null>(null);
@@ -292,6 +376,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [commits, setCommits] = useState<Commit[]>([]);
   const [branches, setBranches] = useState<Branch[]>([]);
   const [repositoryEmpty, setRepositoryEmpty] = useState(false);
+  const [repositoryInfo, setRepositoryInfo] = useState<GitHubRepo | null>(null);
   const [repositoryCommits, setRepositoryCommits] = useState<GitHubCommit[]>([]);
   const [user, setUser] = useState<GitHubUser | null>(null);
   const [connected, setConnected] = useState(false);
@@ -300,7 +385,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [graphLayout, setGraphLayout] = useState<GraphLayoutResult | null>(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
   const [releases, setReleases] = useState<Release[]>([]);
-  const [currentVersion, setCurrentVersion] = useState('0.2');
+  const [currentVersion, setCurrentVersion] = useState('0.2.2');
   const [connectionFailure, setConnectionFailure] = useState<ConnectionErrorInfo | null>(null);
   const [aiOpen, setAiOpen] = useState(false);
   const [aiStatus, setAiStatus] = useState<AiConnectionStatus>(DEFAULT_AI_STATUS);
@@ -313,6 +398,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const projectRef = useRef<Project | null>(null);
   const commitStatsCache = useRef(new Map<string, CommitDetails>());
   const commitStatsRequests = useRef(new Map<string, Promise<CommitDetails | null>>());
+  const teamCache = useRef(new Map<string, TeamCacheEntry>());
+  const teamRequests = useRef(new Map<string, Promise<void>>());
+  const teamProfiles = useRef(new Map<string, GitHubUser>());
+  const [teamCollaborators, setTeamCollaborators] = useState<TeamResource<GitHubCollaborator>>(emptyTeamResource);
+  const [teamInvitations, setTeamInvitations] = useState<TeamResource<GitHubInvitation>>(emptyTeamResource);
+  const [teamContributors, setTeamContributors] = useState<TeamResource<GitHubContributor>>(emptyTeamResource);
+  const [teamStats, setTeamStats] = useState<TeamResource<GitHubContributorStatistics>>(emptyTeamResource);
   projectRef.current = project;
 
   const notify = (text: string) => {
@@ -429,12 +521,19 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     return null;
   };
 
-  const allowMcpWrites = async (): Promise<McpWriteStatus | null> => {
-    const result = await window.electronAPI?.app.allowMcpWrites();
+  const allowMcpWrites = async (duration: McpWriteDuration): Promise<McpWriteStatus | null> => {
+    const result = await window.electronAPI?.app.allowMcpWrites({ duration });
     if (result?.success && result.data) {
-      setAiStatus(current => ({ ...current, ...result.data }));
-      notify('Запись MCP разрешена на 10 минут');
-      return result.data;
+      const status = result.data;
+      setAiStatus(current => ({
+        ...current,
+        ...status,
+        ...(status.mcpWritesDuration === 'forever' ? { mcpWritesExpiresAt: undefined } : {}),
+      }));
+      notify(status.mcpWritesDuration === 'forever'
+        ? 'Запись MCP разрешена до закрытия Gitora'
+        : `Запись MCP разрешена: ${MCP_WRITE_DURATION_LABELS[status.mcpWritesDuration || duration]}`);
+      return status;
     }
     notify(result?.error || 'Не удалось разрешить запись MCP');
     return null;
@@ -443,9 +542,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const revokeMcpWrites = async (): Promise<McpWriteStatus | null> => {
     const result = await window.electronAPI?.app.revokeMcpWrites();
     if (result?.success && result.data) {
-      setAiStatus(current => ({ ...current, ...result.data }));
+      const status = result.data;
+      setAiStatus(current => ({
+        ...current,
+        ...status,
+        mcpWritesExpiresAt: undefined,
+        mcpWritesDuration: undefined,
+      }));
       notify('Запись MCP отключена');
-      return result.data;
+      return status;
     }
     notify(result?.error || 'Не удалось отключить запись MCP');
     return null;
@@ -495,9 +600,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setCommits([]);
     setBranches([]);
     setRepositoryEmpty(false);
+    setRepositoryInfo(null);
     setSelectedCommit(null);
     commitStatsCache.current.clear();
     commitStatsRequests.current.clear();
+    teamCache.current.clear();
+    teamRequests.current.clear();
+    teamProfiles.current.clear();
+    hydrateTeamCache(createTeamCacheEntry());
     setCommitStatsLoading(false);
     setGraphLayout(null);
     setLastUpdatedAt(null);
@@ -505,10 +615,10 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     notify('GitHub отключён');
   };
 
-  const createRepo = async (name: string, description: string, isPrivate: boolean, folderPath?: string): Promise<CreateRepositoryResult | null> => {
+  const createRepo = async (name: string, description: string, isPrivate: boolean, folderPath?: string, options?: CreateRepositoryOptions): Promise<CreateRepositoryResult | null> => {
     setLoading(true);
     try {
-      const result = await window.electronAPI?.github.createRepo(name, description, isPrivate, folderPath);
+      const result = await window.electronAPI?.github.createRepo(name, description, isPrivate, folderPath, options);
       if (!result?.success || !result.data) {
         showError(result?.error || 'Не удалось создать репозиторий');
         return null;
@@ -635,13 +745,29 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const [pullRequests, setPullRequests] = useState<GitHubPR[]>([]);
+  const [pullRequestsLoading, setPullRequestsLoading] = useState(false);
+  const [pullRequestsError, setPullRequestsError] = useState<string | null>(null);
   const [selectedPR, setSelectedPR] = useState<GitHubPR | null>(null);
   const [prOpen, setPrOpen] = useState(false);
+  const pullRequestRequestId = useRef(0);
 
   const loadPullRequests = async (owner: string, repo: string, state?: 'open' | 'closed' | 'all') => {
-    const result = await window.electronAPI?.github.getPullRequests(owner, repo, state);
-    if (result?.success && result.data) {
-      setPullRequests(result.data);
+    const currentRequest = ++pullRequestRequestId.current;
+    setPullRequestsLoading(true);
+    setPullRequestsError(null);
+    setPullRequests([]);
+    try {
+      const result = await window.electronAPI?.github.getPullRequests(owner, repo, state);
+      if (currentRequest !== pullRequestRequestId.current) return;
+      if (result?.success && result.data) {
+        setPullRequests(result.data);
+      } else {
+        setPullRequestsError(result?.error || 'Не удалось загрузить pull requests');
+      }
+    } catch {
+      if (currentRequest === pullRequestRequestId.current) setPullRequestsError('Не удалось загрузить pull requests');
+    } finally {
+      if (currentRequest === pullRequestRequestId.current) setPullRequestsLoading(false);
     }
   };
 
@@ -651,6 +777,65 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       return result.data;
     }
     return null;
+  };
+
+  const getPullRequestFiles = async (owner: string, repo: string, number: number): Promise<GitHubPRFile[] | null> => {
+    const result = await window.electronAPI?.github.getPullRequestFiles(owner, repo, number);
+    if (result?.success && result.data) {
+      return result.data;
+    }
+    return null;
+  };
+
+  const approvePullRequest = async (owner: string, repo: string, number: number): Promise<boolean> => {
+    setLoading(true);
+    try {
+      const result = await window.electronAPI?.github.approvePullRequest(owner, repo, number);
+      if (!result?.success) {
+        showError(result?.error || 'Не удалось одобрить pull request');
+        return false;
+      }
+      notify('Pull request одобрен');
+      return true;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const mergePullRequest = async (owner: string, repo: string, number: number, sha?: string): Promise<boolean> => {
+    setLoading(true);
+    try {
+      const result = await window.electronAPI?.github.mergePullRequest(owner, repo, number, sha);
+      if (!result?.success) {
+        showError(result?.error || 'Не удалось объединить pull request');
+        return false;
+      }
+      if (result.data && !result.data.merged) {
+        showError(result.data.message || 'GitHub не объединил pull request');
+        return false;
+      }
+      notify('Pull request объединён с базовой веткой');
+      await loadPullRequests(owner, repo);
+      return true;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const updatePullRequestState = async (owner: string, repo: string, number: number, state: 'open' | 'closed'): Promise<boolean> => {
+    setLoading(true);
+    try {
+      const result = await window.electronAPI?.github.updatePullRequestState(owner, repo, number, state);
+      if (!result?.success || !result.data) {
+        showError(result?.error || `Не удалось ${state === 'closed' ? 'закрыть' : 'переоткрыть'} pull request`);
+        return false;
+      }
+      setPullRequests(current => current.map(pr => pr.number === number ? { ...pr, ...result.data } : pr));
+      notify(state === 'closed' ? 'Pull request закрыт' : 'Pull request переоткрыт');
+      return true;
+    } finally {
+      setLoading(false);
+    }
   };
 
   const createPullRequest = async (owner: string, repo: string, title: string, body: string, head: string, base: string): Promise<boolean> => {
@@ -698,6 +883,193 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
       notify('Задача создана');
       await loadIssues(owner, repo);
+      return true;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const hydrateTeamCache = (entry: TeamCacheEntry) => {
+    setTeamCollaborators(entry.collaborators);
+    setTeamInvitations(entry.invitations);
+    setTeamContributors(entry.contributors);
+    setTeamStats(entry.stats);
+  };
+
+  const teamCacheEntry = (projectId: string): TeamCacheEntry => {
+    const existing = teamCache.current.get(projectId);
+    if (existing) return existing;
+    const created = createTeamCacheEntry();
+    teamCache.current.set(projectId, created);
+    return created;
+  };
+
+  const fetchTeamResource = async (key: TeamResourceKey, targetProject: Project): Promise<TeamResource<any>> => {
+    const [owner, repo] = targetProject.repo.split('/');
+    if (!window.electronAPI) return { state: 'error', items: [], error: 'Team доступен в приложении Gitora' };
+    let result: GitHubApiResult<GitHubTeamList<any>> | undefined;
+    if (key === 'collaborators') result = await window.electronAPI.github.getCollaborators(owner, repo);
+    if (key === 'invitations') result = await window.electronAPI.github.getInvitations(owner, repo);
+    if (key === 'contributors') result = await window.electronAPI.github.getContributors(owner, repo);
+    if (key === 'stats') result = await window.electronAPI.github.getContributorStats(owner, repo);
+    return teamResourceFromResult(result);
+  };
+
+  const loadTeamResource = async (key: TeamResourceKey, targetProject: Project): Promise<TeamResource<any>> => {
+    const entry = teamCacheEntry(targetProject.id);
+    entry[key] = { ...entry[key], state: 'loading', error: undefined } as never;
+    if (projectRef.current?.id === targetProject.id) hydrateTeamCache(entry);
+    const resource = await fetchTeamResource(key, targetProject);
+    entry[key] = resource as never;
+    if (projectRef.current?.id === targetProject.id) hydrateTeamCache(entry);
+    return resource;
+  };
+
+  const loadTeam = async (force = false): Promise<void> => {
+    const targetProject = projectRef.current;
+    if (!targetProject || !connected || !window.electronAPI) return;
+    const requestKey = targetProject.id;
+    const pending = teamRequests.current.get(requestKey);
+    if (pending) return pending;
+    const entry = teamCacheEntry(requestKey);
+    const keys: TeamResourceKey[] = ['collaborators', 'invitations', 'contributors', 'stats'];
+    if (!force && keys.every(key => entry[key].state !== 'idle')) {
+      hydrateTeamCache(entry);
+      return;
+    }
+
+    for (const key of keys) entry[key] = { ...entry[key], state: 'loading', error: undefined } as never;
+    hydrateTeamCache(entry);
+    const request = (async () => {
+      const resources = await Promise.all(keys.map(key => fetchTeamResource(key, targetProject)));
+      if (projectRef.current?.id !== requestKey) return;
+      keys.forEach((key, index) => { entry[key] = resources[index] as never; });
+      hydrateTeamCache(entry);
+    })().catch(error => {
+      if (projectRef.current?.id !== requestKey) return;
+      const message = error instanceof Error ? error.message : 'Не удалось загрузить Team';
+      const failure = { state: 'error' as const, items: [], error: message };
+      keys.forEach(key => { entry[key] = failure as never; });
+      hydrateTeamCache(entry);
+    }).finally(() => {
+      teamRequests.current.delete(requestKey);
+    });
+    teamRequests.current.set(requestKey, request);
+    return request;
+  };
+
+  const refreshTeam = async (): Promise<void> => {
+    await loadTeam(true);
+  };
+
+  const loadTeamContributorTimeline = async (login: string): Promise<TeamResource<GitHubCommit>> => {
+    const targetProject = projectRef.current;
+    if (!targetProject || !window.electronAPI) return { state: 'error', items: [], error: 'История автора доступна в приложении Gitora' };
+    const entry = teamCacheEntry(targetProject.id);
+    const cached = entry.timelines.get(login);
+    if (cached && cached.state !== 'idle') return cached;
+    const loadingResource: TeamResource<GitHubCommit> = { state: 'loading', items: [] };
+    entry.timelines.set(login, loadingResource);
+    const [owner, repo] = targetProject.repo.split('/');
+    const result = await window.electronAPI.github.getContributorTimeline(owner, repo, login);
+    const resource = teamResourceFromResult(result);
+    entry.timelines.set(login, resource);
+    return resource;
+  };
+
+  const loadTeamProfile = async (login: string): Promise<GitHubUser | null> => {
+    const cached = teamProfiles.current.get(login);
+    if (cached) return cached;
+    if (!window.electronAPI) return null;
+    const result = await window.electronAPI.github.getUserProfile(login);
+    if (!result.success || !result.data) return null;
+    teamProfiles.current.set(login, result.data);
+    return result.data;
+  };
+
+  const teamTargetProject = (owner: string, repo: string) => (
+    projectRef.current?.repo === `${owner}/${repo}` ? projectRef.current : null
+  );
+
+  const addTeamCollaborator = async (owner: string, repo: string, login: string, permission: GitHubCollaboratorPermission): Promise<boolean> => {
+    setLoading(true);
+    try {
+      const result = await window.electronAPI?.github.addCollaborator(owner, repo, login, permission);
+      if (!result?.success) {
+        showError(result?.error || 'Не удалось добавить участника');
+        return false;
+      }
+      const target = teamTargetProject(owner, repo);
+      if (target) await loadTeamResource(result.data?.status === 201 ? 'invitations' : 'collaborators', target);
+      notify(result.data?.status === 201 ? 'Приглашение отправлено' : 'Доступ участника обновлён');
+      return true;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const updateTeamCollaborator = async (owner: string, repo: string, login: string, permission: GitHubCollaboratorPermission): Promise<boolean> => {
+    setLoading(true);
+    try {
+      const result = await window.electronAPI?.github.updateCollaborator(owner, repo, login, permission);
+      if (!result?.success) {
+        showError(result?.error || 'Не удалось изменить роль участника');
+        return false;
+      }
+      const target = teamTargetProject(owner, repo);
+      if (target) {
+        const entry = teamCacheEntry(target.id);
+        entry.collaborators = {
+          ...entry.collaborators,
+          items: entry.collaborators.items.map(collaborator => collaborator.login === login
+            ? { ...collaborator, role_name: permission }
+            : collaborator),
+        };
+        hydrateTeamCache(entry);
+      }
+      notify('Роль участника изменена');
+      return true;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const removeTeamCollaborator = async (owner: string, repo: string, login: string): Promise<boolean> => {
+    setLoading(true);
+    try {
+      const result = await window.electronAPI?.github.removeCollaborator(owner, repo, login);
+      if (!result?.success) {
+        showError(result?.error || 'Не удалось удалить участника');
+        return false;
+      }
+      const target = teamTargetProject(owner, repo);
+      if (target) {
+        const entry = teamCacheEntry(target.id);
+        entry.collaborators = { ...entry.collaborators, items: entry.collaborators.items.filter(collaborator => collaborator.login !== login) };
+        hydrateTeamCache(entry);
+      }
+      notify('Участник удалён');
+      return true;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const cancelTeamInvitation = async (owner: string, repo: string, invitationId: number): Promise<boolean> => {
+    setLoading(true);
+    try {
+      const result = await window.electronAPI?.github.cancelInvitation(owner, repo, invitationId);
+      if (!result?.success) {
+        showError(result?.error || 'Не удалось отменить приглашение');
+        return false;
+      }
+      const target = teamTargetProject(owner, repo);
+      if (target) {
+        const entry = teamCacheEntry(target.id);
+        entry.invitations = { ...entry.invitations, items: entry.invitations.items.filter(invitation => invitation.id !== invitationId) };
+        hydrateTeamCache(entry);
+      }
+      notify('Приглашение отменено');
       return true;
     } finally {
       setLoading(false);
@@ -898,6 +1270,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setCommits([]);
       setBranches([]);
       setRepositoryEmpty(false);
+      setRepositoryInfo(null);
       setRepositoryCommits([]);
       setLastUpdatedAt(null);
     }
@@ -914,6 +1287,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
 
       const repository = result.data;
+      setRepositoryInfo(repository.repository ?? null);
       setRepositoryEmpty(Boolean(repository.empty));
       const nextBranches = mergeBranchPreferences(targetProject.repo, repository.branches.map(branch => ({
         name: branch.name,
@@ -1061,7 +1435,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         setCommits([]);
         setBranches([]);
         setRepositoryEmpty(false);
+        setRepositoryInfo(null);
         setRepositoryCommits([]);
+        hydrateTeamCache(createTeamCacheEntry());
         setLastUpdatedAt(null);
         notify('Обновлено');
         return true;
@@ -1136,6 +1512,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     void loadRepositoryData(project, true, false);
   }, [project?.id, connected]);
 
+  useEffect(() => {
+    if (!project) {
+      hydrateTeamCache(createTeamCacheEntry());
+      return;
+    }
+    hydrateTeamCache(teamCacheEntry(project.id));
+  }, [project?.id]);
+
   return (
     <AppContext.Provider value={{
       project,
@@ -1158,6 +1542,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       commits,
       branches,
       repositoryEmpty,
+      repositoryInfo,
       user,
       connected,
       loading,
@@ -1196,12 +1581,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       renameBranch,
       updateBranchVisualSettings,
       pullRequests,
+      pullRequestsLoading,
+      pullRequestsError,
       selectedPR,
       setSelectedPR,
       prOpen,
       setPrOpen,
       loadPullRequests,
       getPullRequest,
+      getPullRequestFiles,
+      approvePullRequest,
+      mergePullRequest,
+      updatePullRequestState,
       createPullRequest,
       issues,
       selectedIssue,
@@ -1231,6 +1622,18 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       downloadArchive,
       refreshRepositoryData,
       syncAllData,
+      loadTeam,
+      refreshTeam,
+      loadTeamContributorTimeline,
+      loadTeamProfile,
+      addTeamCollaborator,
+      updateTeamCollaborator,
+      removeTeamCollaborator,
+      cancelTeamInvitation,
+      teamCollaborators,
+      teamInvitations,
+      teamContributors,
+      teamStats,
       refreshAiStatus,
       runAiDiagnostics,
       configureAiClient,
