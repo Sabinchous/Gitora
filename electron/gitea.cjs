@@ -677,7 +677,8 @@ async function giteaRequestPage({ apiOrigin, token, githubEndpoint, options = {}
   const method = String(options.method || 'GET').toUpperCase();
   const translation = translateGithubToGitea(githubEndpoint, method, options.body);
   const effectiveMethod = translation.giteaMethod || method;
-  const url = new URL(translation.endpoint, apiOrigin);
+  // NB: new URL('/user', apiOrigin) would DROP the /api/v1 base path, so join strings.
+  const url = new URL(`${apiOrigin}${translation.endpoint}`);
   if (url.origin !== new URL(apiOrigin).origin) throw new Error('Недопустимый адрес Gitea API');
 
   let response;

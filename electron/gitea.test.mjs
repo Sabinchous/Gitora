@@ -162,17 +162,22 @@ describe('client-side commit search', () => {
 describe('Gitea empty responses', () => {
   it('reports a clear error when the server answers 200 without JSON', async () => {
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = async () => ({
-      ok: true,
-      status: 200,
-      headers: { get: (name) => (String(name).toLowerCase() === 'content-type' ? 'text/html' : '') },
-      json: async () => { throw new SyntaxError('Unexpected token'); },
-    });
+    let seenUrl = '';
+    globalThis.fetch = async (url) => {
+      seenUrl = String(url);
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: (name) => (String(name).toLowerCase() === 'content-type' ? 'text/html' : '') },
+        json: async () => { throw new SyntaxError('Unexpected token'); },
+      };
+    };
     try {
       let error = null;
       try {
         await giteaRequestPage({ apiOrigin: 'https://gitea.example.com/api/v1', token: 'x', githubEndpoint: '/user', options: {} });
       } catch (candidate) { error = candidate; }
+      expect(seenUrl).toBe('https://gitea.example.com/api/v1/user');
       expect(error && error.code).toBe('gitea-empty');
       expect(String(error && error.message)).toContain('status 200');
     } finally {

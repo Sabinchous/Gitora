@@ -1206,8 +1206,7 @@ async function uploadGiteaReleaseAsset(owner, repo, release, assetPath) {
   const form = new FormData();
   form.set('attachment', new Blob([asset], { type: 'application/octet-stream' }), fileName);
   const url = new URL(
-    `/repos/${owner}/${repo}/releases/${release.id}/assets?name=${encodeURIComponent(fileName)}`,
-    giteaApiOrigin(giteaBaseUrl),
+    `${giteaApiOrigin(giteaBaseUrl)}/repos/${owner}/${repo}/releases/${release.id}/assets?name=${encodeURIComponent(fileName)}`,
   );
   const response = await fetch(url, {
     method: 'POST',
