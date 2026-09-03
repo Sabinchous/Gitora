@@ -12,6 +12,7 @@ export const LoginModal: React.FC = () => {
     openExternal,
     connectionError,
     clearConnectionError,
+    accounts,
   } = useApp();
   const [provider, setProvider] = useState<GitProviderKind>('github');
   const [token, setToken] = useState('');
@@ -87,7 +88,9 @@ export const LoginModal: React.FC = () => {
           <Github size={28} className="text-[#E7E0D6]" />
         </div>
         <h2 id="login-title" className="text-2xl font-bold tracking-tight mb-2">
-          {provider === 'gitea' ? 'Подключение к Gitea' : 'Подключение к GitHub'}
+          {accounts.length > 0
+            ? 'Добавить аккаунт'
+            : (provider === 'gitea' ? 'Подключение к Gitea' : 'Подключение к GitHub')}
         </h2>
         <p className="text-sm text-[#7D7482] leading-relaxed mb-4">
           {provider === 'gitea'

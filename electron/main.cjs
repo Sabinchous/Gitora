@@ -48,6 +48,7 @@ const {
   giteaRequestPage,
   normalizeGiteaBaseUrl,
 } = require('./gitea.cjs');
+const accountsStore = require('./gitAccounts.cjs');
 
 const isDev = process.argv.includes('--dev');
 const isMcpServer = process.argv.includes('--mcp-server');
@@ -67,6 +68,9 @@ let githubTokenSource = 'none';
 // GitHub-shaped models the renderer expects (see electron/gitea.cjs).
 let gitProvider = 'github';
 let giteaBaseUrl = '';
+// Multi-account session: { activeId, accounts:[{id, provider, baseUrl, token, login}]}.
+// The githubToken/gitProvider/giteaBaseUrl globals always mirror the ACTIVE
+// account, so every existing request helper works unchanged.
 const githubAuthState = authSnapshot();
 const userProfileCache = new Map();
 let mcpBridge = null;
@@ -438,23 +442,23 @@ function authHeaders(token = githubToken) {
   return githubHeaders(token);
 }
 
-async function saveToken(token) {
+let gitSession = { activeId: '', accounts: [] };
+
+async function persistSession() {
   if (!safeStorage.isEncryptionAvailable()) {
     throw new Error('Р—Р°С‰РёС‰С‘РЅРЅРѕРµ С…СЂР°РЅРёР»РёС‰Рµ РћРЎ РЅРµРґРѕСЃС‚СѓРїРЅРѕ');
   }
-  const encrypted = safeStorage.encryptString(serializeSession(token)).toString('base64');
+  const encrypted = safeStorage.encryptString(accountsStore.serializeSession(gitSession)).toString('base64');
   await fs.writeFile(tokenPath(), encrypted, { encoding: 'utf8', mode: 0o600 });
 }
 
 async function restoreToken() {
   try {
     const encrypted = await fs.readFile(tokenPath(), 'utf8');
-    githubToken = deserializeSession(safeStorage.decryptString(Buffer.from(encrypted, 'base64')));
-    githubTokenSource = githubToken ? 'restored-cache' : 'none';
-    return githubToken;
+    gitSession = accountsStore.deserializeSession(safeStorage.decryptString(Buffer.from(encrypted, 'base64')));
+    return accountsStore.findAccount(gitSession, gitSession.activeId);
   } catch {
-    githubToken = null;
-    githubTokenSource = 'none';
+    gitSession = { activeId: '', accounts: [] };
     gitProvider = 'github';
     giteaBaseUrl = '';
     return null;
@@ -464,12 +468,71 @@ async function restoreToken() {
 async function clearToken() {
   githubToken = null;
   githubTokenSource = 'none';
+  gitSession = { activeId: '', accounts: [] };
   gitProvider = 'github';
   giteaBaseUrl = '';
   userProfileCache.clear();
   revokeMcpWrites();
   Object.assign(githubAuthState, authSnapshot());
   await fs.rm(tokenPath(), { force: true });
+}
+
+// Point the active globals at the given account (tokens stay in gitSession).
+function activateAccount(id, source) {
+  const account = accountsStore.findAccount(gitSession, id);
+  if (!account) return null;
+  gitSession.activeId = account.id;
+  githubToken = account.token;
+  gitProvider = account.provider;
+  giteaBaseUrl = account.baseUrl;
+  githubTokenSource = source;
+  userProfileCache.clear();
+  return account;
+}
+
+// Insert or refresh an account by (provider, baseUrl, login).
+function upsertAccount({ provider, baseUrl, token, login }) {
+  const sameIdentity = (candidate) => candidate.provider === provider
+    && candidate.baseUrl === (provider === 'gitea' ? baseUrl : '')
+    && candidate.login.toLowerCase() === String(login || '').toLowerCase();
+  const existing = gitSession.accounts.find(sameIdentity);
+  if (existing) {
+    existing.token = token;
+    existing.login = login;
+    return existing;
+  }
+  const account = accountsStore.normalizeAccount({ provider, baseUrl, token, login });
+  gitSession.accounts.push(account);
+  return account;
+}
+
+// Remove one account; if it was active, fall through to the next one.
+// Returns { account, user } for the newly active account (user=null if none).
+async function removeAccountById(id) {
+  const target = accountsStore.findAccount(gitSession, id);
+  if (!target) throw new Error('Аккаунт не найден');
+  gitSession.accounts = gitSession.accounts.filter(account => account.id !== target.id);
+  if (gitSession.activeId !== target.id) {
+    await persistSession();
+    const active = accountsStore.findAccount(gitSession, gitSession.activeId);
+    return { account: active, user: null };
+  }
+  const next = gitSession.accounts[0] || null;
+  if (!next) {
+    await clearToken();
+    return { account: null, user: null };
+  }
+  activateAccount(next.id, 'switched');
+  const user = await githubRequest('/user');
+  githubAuthState.user = user.login || '';
+  githubAuthState.authType = gitProvider === 'gitea' ? 'Gitea token' : detectGitHubAuthType(githubToken);
+  githubAuthState.tokenSource = githubTokenSource;
+  await persistSession();
+  return { account: next, user };
+}
+
+function snapshotWithUser(user) {
+  return { ...user, ...providerInfo(), ...accountsStore.snapshot(gitSession) };
 }
 
 function githubHeaders(token = githubToken) {
@@ -1489,44 +1552,106 @@ if (!isMcpServer && !hasSingleInstanceLock) {
 
 ipcMain.handle('github:login', result(async (_event, token) => {
   const session = parseLoginInput(token);
+  // Verify the candidate on its own provider without dropping the current session.
+  const previous = { provider: gitProvider, baseUrl: giteaBaseUrl, token: githubToken, source: githubTokenSource };
   gitProvider = session.provider;
   giteaBaseUrl = session.baseUrl;
-  const cleanToken = session.token;
-  const user = await githubRequest('/user', {}, cleanToken);
-  if (!user || !user.login) {
-    throw new Error('Сервер не вернул профиль пользователя. Проверьте токен и доступность API.');
+  try {
+    const user = await githubRequest('/user', {}, session.token);
+    if (!user || !user.login) {
+      throw new Error('Сервер не вернул профиль пользователя. Проверьте токен и доступность API.');
+    }
+    const account = upsertAccount({ provider: session.provider, baseUrl: session.baseUrl, token: session.token, login: user.login });
+    activateAccount(account.id, 'new-login');
+    await persistSession();
+    githubAuthState.user = user.login || '';
+    githubAuthState.authType = gitProvider === 'gitea' ? 'Gitea token' : detectGitHubAuthType(account.token);
+    githubAuthState.tokenSource = githubTokenSource;
+    githubAuthState.scopes = [];
+    githubAuthState.acceptedScopes = [];
+    githubAuthState.acceptedPermissions = {};
+    githubAuthLog();
+    return snapshotWithUser(user);
+  } catch (error) {
+    gitProvider = previous.provider;
+    giteaBaseUrl = previous.baseUrl;
+    githubToken = previous.token;
+    githubTokenSource = previous.source;
+    throw error;
   }
-  await saveToken(cleanToken);
-  githubToken = cleanToken;
-  githubTokenSource = 'new-login';
-  githubAuthState.user = user.login || '';
-  githubAuthState.authType = gitProvider === 'gitea' ? 'Gitea token' : detectGitHubAuthType(cleanToken);
-  githubAuthState.tokenSource = githubTokenSource;
-  githubAuthState.scopes = [];
-  githubAuthState.acceptedScopes = [];
-  githubAuthState.acceptedPermissions = {};
-  githubAuthLog();
-  return { ...user, ...providerInfo() };
 }));
 
 ipcMain.handle('github:restore-session', result(async () => {
-  if (!githubToken) return null;
+  const active = await restoreToken();
+  if (!active) return null;
+  activateAccount(active.id, 'restored-cache');
   try {
     const user = await githubRequest('/user');
     githubAuthState.user = user.login || githubAuthState.user;
     githubAuthState.authType = gitProvider === 'gitea' ? 'Gitea token' : detectGitHubAuthType(githubToken);
     githubAuthState.tokenSource = githubTokenSource;
     githubAuthLog();
-    return { ...user, ...providerInfo() };
+    return snapshotWithUser(user);
   } catch (error) {
-    if (error?.code === 'auth') await clearToken();
+    if (error?.code === 'auth') {
+      try {
+        await removeAccountById(active.id);
+      } catch {
+        await clearToken();
+      }
+    }
     throw error;
   }
 }));
 
 ipcMain.handle('github:logout', result(async () => {
-  await clearToken();
-  return null;
+  const active = accountsStore.findAccount(gitSession, gitSession.activeId);
+  if (!active) {
+    await clearToken();
+    return snapshotWithUser(null);
+  }
+  const { user } = await removeAccountById(active.id);
+  if (!user) return snapshotWithUser(null);
+  githubAuthState.user = user.login || '';
+  return snapshotWithUser(user);
+}));
+
+ipcMain.handle('github:switch-account', result(async (_event, id) => {
+  const accountId = typeof id === 'string' ? id : id?.id;
+  const target = accountsStore.findAccount(gitSession, accountId);
+  if (!target) throw new Error('Аккаунт не найден');
+  const previous = { provider: gitProvider, baseUrl: giteaBaseUrl, token: githubToken, source: githubTokenSource, activeId: gitSession.activeId };
+  activateAccount(target.id, 'switched');
+  try {
+    const user = await githubRequest('/user');
+    githubAuthState.user = user.login || '';
+    githubAuthState.authType = gitProvider === 'gitea' ? 'Gitea token' : detectGitHubAuthType(githubToken);
+    githubAuthState.tokenSource = githubTokenSource;
+    githubAuthState.scopes = [];
+    githubAuthState.acceptedScopes = [];
+    githubAuthState.acceptedPermissions = {};
+    githubAuthLog();
+    await persistSession();
+    return snapshotWithUser(user);
+  } catch (error) {
+    gitProvider = previous.provider;
+    giteaBaseUrl = previous.baseUrl;
+    githubToken = previous.token;
+    githubTokenSource = previous.source;
+    gitSession.activeId = previous.activeId;
+    throw error;
+  }
+}));
+
+ipcMain.handle('github:remove-account', result(async (_event, id) => {
+  const accountId = typeof id === 'string' ? id : id?.id;
+  const { account, user } = await removeAccountById(accountId);
+  if (!account) return snapshotWithUser(null);
+  if (!user) {
+    const current = await githubRequest('/user');
+    return snapshotWithUser(current);
+  }
+  return snapshotWithUser(user);
 }));
 
 ipcMain.handle('provider:get', result(async () => providerInfo()));

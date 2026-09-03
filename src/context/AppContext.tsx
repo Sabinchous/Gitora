@@ -37,8 +37,10 @@ import {
   GitHubRepo,
   GitHubUser,
   GitHubApiResult,
+  GitAccount,
   GitProviderInfo,
   LoginInput,
+  SessionUser,
   TeamLoadState,
   Project,
   Release,
@@ -82,6 +84,8 @@ interface AppState {
   connected: boolean;
   provider: GitProviderInfo;
   providerLabel: string;
+  accounts: GitAccount[];
+  activeAccountId: string;
   loading: boolean;
   error: string | null;
   graphLayout: GraphLayoutResult | null;
@@ -135,6 +139,8 @@ interface AppContextType extends AppState {
   login: (input: LoginInput) => Promise<void>;
   clearConnectionError: () => void;
   logout: () => Promise<void>;
+  switchAccount: (id: string) => Promise<boolean>;
+  removeAccount: (id: string) => Promise<boolean>;
   repoWebUrl: (fullName: string) => string;
   userWebUrl: (login: string) => string;
   commitWebUrl: (fullName: string, sha: string) => string;
@@ -389,6 +395,14 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [connected, setConnected] = useState(false);
   const [provider, setProvider] = useState<GitProviderInfo>({ provider: 'github', baseUrl: '' });
   const providerLabel = provider.provider === 'gitea' ? 'Gitea' : 'GitHub';
+  const [accounts, setAccounts] = useState<GitAccount[]>([]);
+  const [activeAccountId, setActiveAccountId] = useState('');
+
+  const applySession = (data?: { provider?: string; baseUrl?: string; accounts?: GitAccount[]; activeAccountId?: string } | null) => {
+    applyProvider(data);
+    if (Array.isArray(data?.accounts)) setAccounts(data.accounts);
+    if (typeof data?.activeAccountId === 'string') setActiveAccountId(data.activeAccountId);
+  };
 
   const applyProvider = (data?: { provider?: string; baseUrl?: string } | null) => {
     if (data?.provider === 'gitea') {
@@ -613,7 +627,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     const result = await window.electronAPI.github.login(input);
     if (result.success && result.data) {
       setUser(result.data);
-      applyProvider(result.data);
+      applySession(result.data);
       setConnected(true);
       clearConnectionError();
       setLoginOpen(false);
@@ -624,12 +638,13 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setLoading(false);
   };
 
-  const logout = async () => {
-    await window.electronAPI?.github.logout();
+  const clearWorkspaceState = () => {
     requestId.current += 1;
     setConnected(false);
     setProvider({ provider: 'github', baseUrl: '' });
     setUser(null);
+    setAccounts([]);
+    setActiveAccountId('');
     setProjects([]);
     setProject(null);
     setCommits([]);
@@ -647,7 +662,76 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setGraphLayout(null);
     setLastUpdatedAt(null);
     setConnectionFailure(null);
-    notify(`${providerLabel} отключён`);
+  };
+
+  const adoptSessionUser = async (data: SessionUser, toast: string): Promise<boolean> => {
+    if (!data?.login) return false;
+    setUser(data);
+    applySession(data);
+    setConnected(true);
+    clearConnectionError();
+    setLoginOpen(false);
+    notify(toast);
+    await loadRepos();
+    return true;
+  };
+
+  const logout = async () => {
+    const disconnectedLabel = providerLabel;
+    const result = await window.electronAPI?.github.logout();
+    clearWorkspaceState();
+    const data = (result?.success ? result.data : null) as SessionUser | null;
+    if (data && data.login) {
+      await adoptSessionUser(data, `Переключено на ${data.login}`);
+      return;
+    }
+    if (data) applySession(data);
+    notify(`${disconnectedLabel} отключён`);
+  };
+
+  const switchAccount = async (id: string): Promise<boolean> => {
+    if (!window.electronAPI || !id || id === activeAccountId) return false;
+    setLoading(true);
+    try {
+      const result = await window.electronAPI.github.switchAccount(id);
+      if (!result?.success || !result.data?.login) {
+        showError(result?.error || 'Не удалось переключить аккаунт');
+        return false;
+      }
+      clearWorkspaceState();
+      await adoptSessionUser(result.data, `Подключён ${result.data.login}`);
+      return true;
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const removeAccount = async (id: string): Promise<boolean> => {
+    if (!window.electronAPI || !id) return false;
+    setLoading(true);
+    try {
+      const result = await window.electronAPI.github.removeAccount(id);
+      if (!result?.success) {
+        showError(result?.error || 'Не удалось удалить аккаунт');
+        return false;
+      }
+      if (id === activeAccountId) {
+        if (result.data?.login) {
+          clearWorkspaceState();
+          await adoptSessionUser(result.data, `Подключён ${result.data.login}`);
+        } else {
+          if (result.data) applySession(result.data);
+          else clearWorkspaceState();
+          notify('Аккаунт отключён');
+        }
+      } else if (result.data) {
+        applySession(result.data);
+        notify('Аккаунт удалён');
+      }
+      return true;
+    } finally {
+      setLoading(false);
+    }
   };
 
   const createRepo = async (name: string, description: string, isPrivate: boolean, folderPath?: string, options?: CreateRepositoryOptions): Promise<CreateRepositoryResult | null> => {
@@ -1508,7 +1592,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
       if (sessionResult.success && sessionResult.data) {
         setUser(sessionResult.data);
-        applyProvider(sessionResult.data);
+        applySession(sessionResult.data);
         setConnected(true);
         await loadRepos();
       } else {
@@ -1609,8 +1693,12 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       login,
       clearConnectionError,
       logout,
+      switchAccount,
+      removeAccount,
       provider,
       providerLabel,
+      accounts,
+      activeAccountId,
       repoWebUrl,
       userWebUrl,
       commitWebUrl,

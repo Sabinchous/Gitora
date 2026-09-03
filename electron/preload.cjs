@@ -4,6 +4,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   github: {
     login: (token) => ipcRenderer.invoke('github:login', token),
     getProvider: () => ipcRenderer.invoke('provider:get'),
+    switchAccount: (id) => ipcRenderer.invoke('github:switch-account', id),
+    removeAccount: (id) => ipcRenderer.invoke('github:remove-account', id),
     restoreSession: () => ipcRenderer.invoke('github:restore-session'),
     logout: () => ipcRenderer.invoke('github:logout'),
     getRepos: () => ipcRenderer.invoke('github:repos'),

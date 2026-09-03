@@ -89,6 +89,20 @@ export interface AuthenticatedUser extends GitHubUser {
   baseUrl: string;
 }
 
+export interface GitAccount {
+  id: string;
+  provider: GitProviderKind;
+  baseUrl: string;
+  login: string;
+}
+
+export interface AccountsSnapshot {
+  accounts: GitAccount[];
+  activeAccountId: string;
+}
+
+export type SessionUser = AuthenticatedUser & Partial<AccountsSnapshot>;
+
 export type GitHubCollaboratorPermission = 'pull' | 'triage' | 'push' | 'maintain' | 'admin';
 export type GitHubTeamRole = 'Read' | 'Triage' | 'Write' | 'Maintain' | 'Admin';
 export type TeamLoadState = 'idle' | 'loading' | 'loaded' | 'empty' | 'forbidden' | 'error' | 'pending';
@@ -544,9 +558,11 @@ export interface DownloadOptions {
 
 export interface ElectronAPI {
   github: {
-    login: (token: LoginInput) => Promise<GitHubApiResult<AuthenticatedUser>>;
+    login: (token: LoginInput) => Promise<GitHubApiResult<SessionUser>>;
     getProvider: () => Promise<GitHubApiResult<GitProviderInfo>>;
-    restoreSession: () => Promise<GitHubApiResult<AuthenticatedUser | null>>;
+    switchAccount: (id: string) => Promise<GitHubApiResult<SessionUser>>;
+    removeAccount: (id: string) => Promise<GitHubApiResult<SessionUser | null>>;
+    restoreSession: () => Promise<GitHubApiResult<SessionUser | null>>;
     logout: () => Promise<GitHubApiResult<null>>;
     getRepos: () => Promise<GitHubApiResult<GitHubRepo[]>>;
     getLatestCommit: (owner: string, repo: string) => Promise<GitHubApiResult<GitHubCommit | null>>;
