@@ -134,6 +134,8 @@ export const ProjectList: React.FC = () => {
     connected,
     user,
     getLatestCommit,
+    repoWebUrl,
+    providerLabel,
   } = useApp();
   const [query, setQuery] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
@@ -443,7 +445,7 @@ export const ProjectList: React.FC = () => {
   const handleCopyLink = async (nextProject: Project) => {
     closeMenu();
     try {
-      await navigator.clipboard.writeText(`https://github.com/${nextProject.repo}`);
+      await navigator.clipboard.writeText(repoWebUrl(nextProject.repo));
       notify('Ссылка на репозиторий скопирована');
     } catch {
       notify('Не удалось скопировать ссылку');
@@ -452,7 +454,7 @@ export const ProjectList: React.FC = () => {
 
   const handleOpenGithub = (nextProject: Project) => {
     closeMenu();
-    void openExternal(`https://github.com/${nextProject.repo}`);
+    void openExternal(repoWebUrl(nextProject.repo));
   };
 
   const resetList = () => {
@@ -773,7 +775,7 @@ export const ProjectList: React.FC = () => {
             onClick={() => handleOpenGithub(openMenuProject)}
           >
             <ExternalLink size={14} />
-            Открыть на GitHub
+            Открыть на {providerLabel}
           </button>
           <button
             type="button"
@@ -796,7 +798,7 @@ export const ProjectList: React.FC = () => {
             }}
           >
             <Trash2 size={14} />
-            Удалить с GitHub
+            Удалить с {providerLabel}
           </button>
         </div>,
         document.body,
@@ -815,7 +817,7 @@ export const ProjectList: React.FC = () => {
             </div>
             <h2 id="delete-title" className="text-xl font-semibold leading-tight">Удалить репозиторий?</h2>
             <p id="delete-description" className="mt-2 text-sm leading-relaxed text-[var(--muted)]">
-              <b className="text-[var(--ink)]">{confirmDelete.name}</b> будет удалён с GitHub и исчезнет из Gitora.
+              <b className="text-[var(--ink)]">{confirmDelete.name}</b> будет удалён с {providerLabel} и исчезнет из Gitora.
             </p>
             <p id="delete-warning" className="mt-4 rounded-lg bg-[var(--danger-soft)] px-3 py-2.5 text-xs leading-relaxed text-[#A16C62]">
               Это действие необратимо. Удалятся коммиты, ветки, файлы и другие данные репозитория.

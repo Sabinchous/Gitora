@@ -35,9 +35,8 @@ const directionOptions: Array<{ value: BranchDirection; label: string; Icon: typ
   { value: 'right', label: 'Расположить ветку справа', Icon: ArrowRight },
 ];
 
-function branchUrl(repoFullName: string, branchName: string): string {
-  const path = branchName.split('/').map(part => encodeURIComponent(part)).join('/');
-  return `https://github.com/${repoFullName}/tree/${path}`;
+function branchPath(branchName: string): string {
+  return branchName.split('/').map(part => encodeURIComponent(part)).join('/');
 }
 
 export const BranchModal: React.FC<BranchModalProps> = ({ branches, repoFullName, defaultBranch, initialTab = 'list' }) => {
@@ -52,6 +51,8 @@ export const BranchModal: React.FC<BranchModalProps> = ({ branches, repoFullName
     openExternal,
     notify,
     loading,
+    repoWebUrl,
+    providerLabel,
   } = useApp();
   const [owner, repo] = repoFullName.split('/');
   const [activeTab, setActiveTab] = useState<'list' | 'create'>(initialTab);
@@ -225,7 +226,7 @@ export const BranchModal: React.FC<BranchModalProps> = ({ branches, repoFullName
                         { id: 'checkout', label: 'Переключиться на ветку', icon: GitBranch, onSelect: () => chooseBranch(branch.name) },
                         { id: 'rename', label: 'Переименовать', icon: Pencil, onSelect: () => openEdit(branch) },
                         { id: 'visual', label: 'Настроить цвет и сторону', icon: Palette, onSelect: () => openEdit(branch) },
-                        { id: 'github', label: 'Открыть на GitHub', icon: Code2, external: true, onSelect: () => openExternal(branchUrl(repoFullName, branch.name)) },
+                        { id: 'github', label: `Открыть на ${providerLabel}`, icon: Code2, external: true, onSelect: () => openExternal(`${repoWebUrl(repoFullName)}/tree/${branchPath(branch.name)}`) },
                         { id: 'copy', label: 'Скопировать название', icon: Copy, onSelect: () => copyBranchName(branch.name) },
                         { id: 'delete', label: 'Удалить', icon: Trash2, danger: true, dividerBefore: true, disabled: branch.name === defaultBranch, onSelect: () => setConfirmDelete(branch) },
                       ]}

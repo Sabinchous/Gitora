@@ -99,6 +99,8 @@ export const DetailPanel: React.FC = () => {
     downloadArchive,
     loadCommitDetail,
     commitStatsLoading,
+    commitWebUrl,
+    providerLabel,
   } = useApp();
   const [copiedHash, setCopiedHash] = useState(false);
   const copiedTimer = useRef<number | undefined>(undefined);
@@ -182,7 +184,7 @@ export const DetailPanel: React.FC = () => {
               items={[
                 { id: 'copy-sha', label: 'Копировать SHA', icon: Copy, onSelect: () => void copyHash() },
                 { id: 'download', label: 'Скачать эту версию', icon: Download, onSelect: () => { const [owner, repo] = project.repo.split('/'); void downloadArchive(owner, repo, selectedCommit.id); } },
-                { id: 'github', label: 'Открыть на GitHub', icon: Github, onSelect: () => void openExternal(`https://github.com/${project.repo}/commit/${selectedCommit.id}`), external: true },
+                { id: 'github', label: `Открыть на ${providerLabel}`, icon: Github, onSelect: () => void openExternal(commitWebUrl(project.repo, selectedCommit.id)), external: true },
               ]}
             />
           )}

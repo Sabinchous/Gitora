@@ -5,7 +5,7 @@ import { GitHubIssue } from '../../types';
 import { readableTextColor } from '../../lib/colors';
 
 export const IssueDetail: React.FC = () => {
-  const { selectedIssue, setSelectedIssue, openExternal } = useApp();
+  const { selectedIssue, setSelectedIssue, openExternal, providerLabel } = useApp();
 
   if (!selectedIssue) return null;
 
@@ -98,7 +98,7 @@ export const IssueDetail: React.FC = () => {
           onClick={() => void openExternal(selectedIssue.html_url)}
         >
           <ExternalLink size={16} />
-          Открыть на GitHub
+          Открыть на {providerLabel}
         </button>
       </div>
     </div>

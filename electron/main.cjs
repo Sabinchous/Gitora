@@ -41,6 +41,13 @@ const {
   repositoryFromEndpoint,
 } = require('./githubAuth.cjs');
 const { createRepositoryFile, isEmptyRepository } = require('../mcpRepository.cjs');
+const {
+  giteaApiOrigin,
+  giteaHeaders,
+  giteaOrigin,
+  giteaRequestPage,
+  normalizeGiteaBaseUrl,
+} = require('./gitea.cjs');
 
 const isDev = process.argv.includes('--dev');
 const isMcpServer = process.argv.includes('--mcp-server');
@@ -54,6 +61,12 @@ const execFileAsync = promisify(execFile);
 let mainWindow;
 let githubToken = null;
 let githubTokenSource = 'none';
+// Active git provider: 'github' (api.github.com) or 'gitea' ({baseUrl}/api/v1).
+// All `github*` request helpers below route through the active provider, so
+// every IPC handler keeps working while Gitea responses are normalized to the
+// GitHub-shaped models the renderer expects (see electron/gitea.cjs).
+let gitProvider = 'github';
+let giteaBaseUrl = '';
 const githubAuthState = authSnapshot();
 const userProfileCache = new Map();
 let mcpBridge = null;
@@ -368,23 +381,82 @@ function tokenPath() {
   return path.join(app.getPath('userData'), 'github-session');
 }
 
+// Session payload: JSON { provider, baseUrl, token }. Legacy plain-token
+// files (GitHub only) are still accepted on restore and migrate on next save.
+function serializeSession(token) {
+  return JSON.stringify({ provider: gitProvider, baseUrl: giteaBaseUrl, token });
+}
+
+function deserializeSession(decrypted) {
+  const value = typeof decrypted === 'string' ? decrypted : '';
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed && typeof parsed.token === 'string' && parsed.token) {
+      gitProvider = parsed.provider === 'gitea' ? 'gitea' : 'github';
+      giteaBaseUrl = typeof parsed.baseUrl === 'string' ? parsed.baseUrl : '';
+      if (gitProvider === 'github') giteaBaseUrl = '';
+      return parsed.token;
+    }
+  } catch {
+    // Legacy plain-token session below.
+  }
+  gitProvider = 'github';
+  giteaBaseUrl = '';
+  return value || null;
+}
+
+function providerInfo() {
+  return { provider: gitProvider, baseUrl: gitProvider === 'gitea' ? giteaBaseUrl : '' };
+}
+
+// Login input: legacy GitHub token string, or
+// { provider: 'github', token } / { provider: 'gitea', token, baseUrl }.
+function parseLoginInput(input) {
+  if (typeof input === 'string') {
+    const cleanToken = input.trim();
+    if (!cleanToken) throw new Error('Введите GitHub-токен');
+    return { provider: 'github', baseUrl: '', token: cleanToken };
+  }
+  const data = input && typeof input === 'object' ? input : {};
+  if (data.provider === 'gitea') {
+    const { baseUrl } = normalizeGiteaBaseUrl(data.baseUrl);
+    const cleanToken = typeof data.token === 'string' ? data.token.trim() : '';
+    if (!cleanToken) throw new Error('Вставьте токен доступа Gitea');
+    return { provider: 'gitea', baseUrl, token: cleanToken };
+  }
+  const cleanToken = typeof data.token === 'string' ? data.token.trim() : '';
+  if (!cleanToken) throw new Error('Введите GitHub-токен');
+  return { provider: 'github', baseUrl: '', token: cleanToken };
+}
+
+function activeApiOrigin() {
+  return gitProvider === 'gitea' ? giteaApiOrigin(giteaBaseUrl) : API_ORIGIN;
+}
+
+function authHeaders(token = githubToken) {
+  if (gitProvider === 'gitea') return giteaHeaders(token);
+  return githubHeaders(token);
+}
+
 async function saveToken(token) {
   if (!safeStorage.isEncryptionAvailable()) {
     throw new Error('Р—Р°С‰РёС‰С‘РЅРЅРѕРµ С…СЂР°РЅРёР»РёС‰Рµ РћРЎ РЅРµРґРѕСЃС‚СѓРїРЅРѕ');
   }
-  const encrypted = safeStorage.encryptString(token).toString('base64');
+  const encrypted = safeStorage.encryptString(serializeSession(token)).toString('base64');
   await fs.writeFile(tokenPath(), encrypted, { encoding: 'utf8', mode: 0o600 });
 }
 
 async function restoreToken() {
   try {
     const encrypted = await fs.readFile(tokenPath(), 'utf8');
-    githubToken = safeStorage.decryptString(Buffer.from(encrypted, 'base64'));
+    githubToken = deserializeSession(safeStorage.decryptString(Buffer.from(encrypted, 'base64')));
     githubTokenSource = githubToken ? 'restored-cache' : 'none';
     return githubToken;
   } catch {
     githubToken = null;
     githubTokenSource = 'none';
+    gitProvider = 'github';
+    giteaBaseUrl = '';
     return null;
   }
 }
@@ -392,6 +464,8 @@ async function restoreToken() {
 async function clearToken() {
   githubToken = null;
   githubTokenSource = 'none';
+  gitProvider = 'github';
+  giteaBaseUrl = '';
   userProfileCache.clear();
   revokeMcpWrites();
   Object.assign(githubAuthState, authSnapshot());
@@ -409,6 +483,9 @@ function githubHeaders(token = githubToken) {
 }
 
 async function githubRequestPage(endpoint, options = {}, token = githubToken) {
+  if (gitProvider === 'gitea') {
+    return giteaRequestPage({ apiOrigin: giteaApiOrigin(giteaBaseUrl), token, githubEndpoint: endpoint, options });
+  }
   if (token && githubAuthState.authType === 'None') {
     githubAuthState.authType = detectGitHubAuthType(token);
     githubAuthState.tokenSource = githubTokenSource;
@@ -542,7 +619,7 @@ async function githubRequestAll(endpoint, options = {}, token = githubToken) {
     endpoint,
     nextEndpoint => githubRequestPage(nextEndpoint, options, token),
     {
-      apiOrigin: API_ORIGIN,
+      apiOrigin: activeApiOrigin(),
       onPage: page => mcpLog('github_page_fetched', {
         endpoint: page.endpoint,
         page: page.page,
@@ -652,7 +729,12 @@ function result(handler) {
 function isAllowedExternal(rawUrl) {
   try {
     const url = new URL(rawUrl);
-    return url.protocol === 'https:' && url.origin === GITHUB_ORIGIN;
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return false;
+    if (url.origin === GITHUB_ORIGIN) return true;
+    // Installed Gitea instance of the current session (https, or http for
+    // local test servers).
+    if (gitProvider === 'gitea' && giteaBaseUrl && url.origin === giteaOrigin(giteaBaseUrl)) return true;
+    return false;
   } catch {
     return false;
   }
@@ -958,6 +1040,187 @@ async function commitTreeChanges(owner, repo, branch, baseTreeSha, parentSha, ch
   return commit;
 }
 
+// --- Gitea file operations -------------------------------------------------
+// Gitea has no GitHub-compatible git-database API (blobs/trees/commits), so
+// file writes go through the contents API: one commit per file.
+
+function giteaContentsPath(filePath) {
+  return String(filePath).split('/').map(encodeURIComponent).join('/');
+}
+
+async function giteaContentsEntry(owner, repo, filePath, branch) {
+  const params = branch ? `?ref=${encodeURIComponent(branch)}` : '';
+  try {
+    return await githubRequest(`/repos/${owner}/${repo}/contents/${giteaContentsPath(filePath)}${params}`);
+  } catch (error) {
+    if (error?.status === 404) return null;
+    throw error;
+  }
+}
+
+function giteaBase64Equal(first, second) {
+  return String(first || '').replace(/\s/g, '') === String(second || '').replace(/\s/g, '');
+}
+
+async function giteaCommitFile({ owner, repo, branch, relativePath, content, message }) {
+  const base64 = Buffer.isBuffer(content) ? content.toString('base64') : Buffer.from(String(content || ''), 'utf8').toString('base64');
+  const existing = await giteaContentsEntry(owner, repo, relativePath, branch);
+  if (existing && existing.sha && giteaBase64Equal(existing.content, base64)) {
+    return { sha: existing.sha, changed: false };
+  }
+  const file = await githubRequest(`/repos/${owner}/${repo}/contents/${giteaContentsPath(relativePath)}`, {
+    method: existing && existing.sha ? 'PUT' : 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      message,
+      content: base64,
+      branch,
+      ...(existing && existing.sha ? { sha: existing.sha } : {}),
+    }),
+  });
+  const sha = file?.commit?.sha || file?.content?.sha || existing?.sha || '';
+  return { sha, changed: true };
+}
+
+async function uploadFolderToGiteaRepo(owner, repo, folderData, repository) {
+  const { files } = folderData;
+  if (files.length === 0) return { uploadedCount: 0, skippedCount: 0, uploadStatus: 'none' };
+  const branch = repository?.default_branch || 'main';
+  const MAX_GITEA_UPLOAD_FILES = 100;
+  const batch = files.slice(0, MAX_GITEA_UPLOAD_FILES);
+  let uploadedCount = 0;
+  let skippedCount = files.length - batch.length;
+
+  for (const file of batch) {
+    try {
+      const content = await fs.readFile(file.fullPath);
+      await giteaCommitFile({
+        owner,
+        repo,
+        branch,
+        relativePath: file.relativePath,
+        content,
+        message: `Add ${file.relativePath}`,
+      });
+      uploadedCount += 1;
+    } catch {
+      skippedCount += 1;
+    }
+  }
+
+  return {
+    uploadedCount,
+    skippedCount,
+    uploadStatus: uploadedCount === 0 ? 'error' : (skippedCount > 0 ? 'partial' : 'success'),
+  };
+}
+
+async function buildGiteaFolderChanges(owner, repo, branch, folderPath) {
+  const folderData = await scanUploadFolder(folderPath);
+  const changes = [];
+  const files = new Map();
+  const bounded = folderData.files.slice(0, 200);
+  const warnings = [...folderData.warnings];
+  if (folderData.files.length > bounded.length) {
+    warnings.push(`Gitea: сверены первые ${bounded.length} из ${folderData.files.length} файлов`);
+  }
+  warnings.push('Gitea: удаления файлов на сервере не сверяются');
+
+  for (const file of bounded) {
+    const content = await fs.readFile(file.fullPath);
+    files.set(file.relativePath, { ...file, content });
+    const remote = await giteaContentsEntry(owner, repo, file.relativePath, branch);
+    if (!remote) changes.push({ path: file.relativePath, status: 'added' });
+    else if (remote.sha && !giteaBase64Equal(remote.content, content.toString('base64'))) {
+      changes.push({ path: file.relativePath, status: 'modified' });
+    }
+  }
+
+  return {
+    folderPath,
+    branch,
+    warnings,
+    files,
+    changes,
+    added: changes.filter(change => change.status === 'added').length,
+    modified: changes.filter(change => change.status === 'modified').length,
+    deleted: 0,
+  };
+}
+
+async function commitGiteaFolderChanges(owner, repo, branch, data, message) {
+  if (data.changes.length === 0) {
+    const head = await githubRequest(`/repos/${owner}/${repo}/branches/${encodeURIComponent(branch)}`);
+    return { sha: head?.commit?.sha || '', changed: false, count: 0 };
+  }
+  let sha = '';
+  let count = 0;
+  for (const change of data.changes) {
+    const file = data.files.get(change.path);
+    if (!file) continue;
+    const result = await giteaCommitFile({
+      owner,
+      repo,
+      branch,
+      relativePath: change.path,
+      content: file.content,
+      message,
+    });
+    if (result.changed) {
+      count += 1;
+      sha = result.sha || sha;
+    }
+  }
+  return { sha, changed: count > 0, count };
+}
+
+async function resolveGiteaLabelIds(owner, repo, labels) {
+  const names = Array.isArray(labels) ? labels.map(label => String(label || '').trim()).filter(Boolean) : [];
+  if (names.length === 0) return undefined;
+  try {
+    const remote = await githubRequest(`/repos/${owner}/${repo}/labels`);
+    const byName = new Map((Array.isArray(remote) ? remote : []).map(label => [String(label.name), label.id]));
+    const ids = names.map(name => byName.get(name)).filter(id => id !== undefined);
+    return ids.length > 0 ? ids : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function renameGiteaBranch(owner, repo, branch, newName) {
+  const source = await githubRequest(`/repos/${owner}/${repo}/branches/${refPath(branch)}`);
+  const sha = source?.commit?.sha || '';
+  await githubRequest(`/repos/${owner}/${repo}/branches`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ new_branch_name: newName, old_ref_name: sha || branch }),
+  });
+  await githubRequest(`/repos/${owner}/${repo}/branches/${refPath(branch)}`, { method: 'DELETE' });
+  return githubRequest(`/repos/${owner}/${repo}/branches/${refPath(newName)}`);
+}
+
+async function uploadGiteaReleaseAsset(owner, repo, release, assetPath) {
+  // Gitea attaches assets via multipart POST, unlike GitHub's upload_url flow.
+  const asset = await fs.readFile(assetPath);
+  const fileName = path.basename(assetPath);
+  const form = new FormData();
+  form.set('attachment', new Blob([asset], { type: 'application/octet-stream' }), fileName);
+  const url = new URL(
+    `/repos/${owner}/${repo}/releases/${release.id}/assets?name=${encodeURIComponent(fileName)}`,
+    giteaApiOrigin(giteaBaseUrl),
+  );
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: giteaHeaders(githubToken),
+    body: form,
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => null);
+    throw new Error(data?.message || 'Не удалось загрузить файл релиза в Gitea');
+  }
+  return mapRelease(await githubRequest(`/repos/${owner}/${repo}/releases/${release.id}`));
+}
+
 async function resolveDownloadPath(fileName, options = {}) {
   const safeFileName = path.basename(String(fileName || 'download'));
 
@@ -1226,17 +1489,22 @@ if (!isMcpServer && !hasSingleInstanceLock) {
 }
 
 ipcMain.handle('github:login', result(async (_event, token) => {
-  const cleanToken = typeof token === 'string' ? token.trim() : '';
-  if (!cleanToken) throw new Error('Р’РІРµРґРёС‚Рµ GitHub-С‚РѕРєРµРЅ');
+  const session = parseLoginInput(token);
+  gitProvider = session.provider;
+  giteaBaseUrl = session.baseUrl;
+  const cleanToken = session.token;
   const user = await githubRequest('/user', {}, cleanToken);
   await saveToken(cleanToken);
   githubToken = cleanToken;
   githubTokenSource = 'new-login';
   githubAuthState.user = user.login || '';
-  githubAuthState.authType = detectGitHubAuthType(cleanToken);
+  githubAuthState.authType = gitProvider === 'gitea' ? 'Gitea token' : detectGitHubAuthType(cleanToken);
   githubAuthState.tokenSource = githubTokenSource;
+  githubAuthState.scopes = [];
+  githubAuthState.acceptedScopes = [];
+  githubAuthState.acceptedPermissions = {};
   githubAuthLog();
-  return user;
+  return { ...user, ...providerInfo() };
 }));
 
 ipcMain.handle('github:restore-session', result(async () => {
@@ -1244,10 +1512,10 @@ ipcMain.handle('github:restore-session', result(async () => {
   try {
     const user = await githubRequest('/user');
     githubAuthState.user = user.login || githubAuthState.user;
-    githubAuthState.authType = detectGitHubAuthType(githubToken);
+    githubAuthState.authType = gitProvider === 'gitea' ? 'Gitea token' : detectGitHubAuthType(githubToken);
     githubAuthState.tokenSource = githubTokenSource;
     githubAuthLog();
-    return user;
+    return { ...user, ...providerInfo() };
   } catch (error) {
     if (error?.code === 'auth') await clearToken();
     throw error;
@@ -1258,6 +1526,8 @@ ipcMain.handle('github:logout', result(async () => {
   await clearToken();
   return null;
 }));
+
+ipcMain.handle('provider:get', result(async () => providerInfo()));
 
 ipcMain.handle('github:repos', result(async () => (
   githubRequestAll('/user/repos?per_page=100&sort=updated')
@@ -1932,7 +2202,9 @@ ipcMain.handle('github:create-repo', result(async (_event, input) => {
 
   try {
     const [owner] = repo.full_name.split('/');
-    const uploadResult = await uploadFolderToRepo(owner, repo.name, folderData, repo);
+    const uploadResult = gitProvider === 'gitea'
+      ? await uploadFolderToGiteaRepo(owner, repo.name, folderData, repo)
+      : await uploadFolderToRepo(owner, repo.name, folderData, repo);
     return { repo, ...uploadResult };
   } catch (uploadError) {
     return { repo, uploadStatus: 'error', uploadedCount: 0, skippedCount: folderData.fileCount };
@@ -1981,6 +2253,7 @@ ipcMain.handle('github:rename-branch', result(async (_event, { owner, repo, bran
   if (!isValidGitRef(branch)) throw new Error('РќРµРєРѕСЂСЂРµРєС‚РЅРѕРµ РёРјСЏ РІРµС‚РєРё');
   if (!isValidGitRef(newName)) throw new Error('РќРµРєРѕСЂСЂРµРєС‚РЅРѕРµ РЅРѕРІРѕРµ РёРјСЏ РІРµС‚РєРё');
 
+  if (gitProvider === 'gitea') return renameGiteaBranch(owner, repo, branch, newName);
   const ref = await githubRequest(`/repos/${owner}/${repo}/git/refs/heads/${refPath(branch)}`);
   return githubRequest(`/repos/${owner}/${repo}/git/refs/heads/${refPath(branch)}`, {
     method: 'PATCH',
@@ -2082,6 +2355,12 @@ ipcMain.handle('github:create-issue', result(async (_event, { owner, repo, title
   if (labels && labels.length > 0) {
     Object.assign(payload, { labels });
   }
+  if (gitProvider === 'gitea') {
+    // Gitea issues API expects label IDs: resolve names first.
+    const labelIds = await resolveGiteaLabelIds(owner, repo, labels);
+    if (labelIds) payload.labels = labelIds;
+    else delete payload.labels;
+  }
   return githubRequest(`/repos/${owner}/${repo}/issues`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -2111,6 +2390,8 @@ ipcMain.handle('github:create-release', result(async (_event, { owner, repo, inp
   const assetPath = typeof input?.assetPath === 'string' ? input.assetPath.trim() : '';
   if (!assetPath) return mapRelease(release);
 
+  if (gitProvider === 'gitea') return uploadGiteaReleaseAsset(owner, repo, release, assetPath);
+
   const asset = await fs.readFile(assetPath);
   const uploadUrl = release.upload_url.replace(
     '{?name,label}',
@@ -2136,8 +2417,11 @@ ipcMain.handle('github:create-release', result(async (_event, { owner, repo, inp
 ipcMain.handle('github:get-readme', result(async (_event, { owner, repo, branch }) => {
   if (!validRepo(owner, repo)) throw new Error('Некорректное имя репозитория');
   const ref = typeof branch === 'string' && branch.trim() ? branch.trim() : 'main';
-  const response = await fetch(`${API_ORIGIN}/repos/${owner}/${repo}/contents/README.md?ref=${encodeURIComponent(ref)}`, {
-    headers: githubHeaders(),
+  const readmeUrl = gitProvider === 'gitea'
+    ? `${giteaApiOrigin(giteaBaseUrl)}/repos/${owner}/${repo}/contents/README.md?ref=${encodeURIComponent(ref)}`
+    : `${API_ORIGIN}/repos/${owner}/${repo}/contents/README.md?ref=${encodeURIComponent(ref)}`;
+  const response = await fetch(readmeUrl, {
+    headers: authHeaders(),
   });
   if (response.status === 404) return '';
   const data = await response.json().catch(() => null);
@@ -2150,6 +2434,17 @@ ipcMain.handle('github:save-readme', result(async (_event, { owner, repo, branch
   const ref = typeof branch === 'string' && branch.trim() ? branch.trim() : 'main';
   const cleanMessage = typeof message === 'string' && message.trim() ? message.trim() : 'Обновлён README';
   const buffer = Buffer.from(typeof content === 'string' ? content : '', 'utf8');
+  if (gitProvider === 'gitea') {
+    const result = await giteaCommitFile({
+      owner,
+      repo,
+      branch: ref,
+      relativePath: 'README.md',
+      content: buffer,
+      message: cleanMessage,
+    });
+    return { sha: result.sha, changed: result.changed };
+  }
   const repositoryInfo = await githubRequest(`/repos/${owner}/${repo}`);
   if (isEmptyRepository(repositoryInfo)) {
     const result = await createRepositoryFile(
@@ -2193,7 +2488,9 @@ ipcMain.handle('github:check-folder-changes', result(async (_event, { owner, rep
   const ref = typeof branch === 'string' && branch.trim() ? branch.trim() : 'main';
   const cleanFolderPath = typeof folderPath === 'string' ? folderPath.trim() : '';
   if (!cleanFolderPath) throw new Error('Выберите папку проекта');
-  const data = await buildFolderChanges(owner, repo, ref, cleanFolderPath);
+  const data = gitProvider === 'gitea'
+    ? await buildGiteaFolderChanges(owner, repo, ref, cleanFolderPath)
+    : await buildFolderChanges(owner, repo, ref, cleanFolderPath);
   return {
     folderPath: data.folderPath,
     branch: data.branch,
@@ -2211,6 +2508,10 @@ ipcMain.handle('github:commit-folder-changes', result(async (_event, { owner, re
   const cleanFolderPath = typeof folderPath === 'string' ? folderPath.trim() : '';
   if (!cleanFolderPath) throw new Error('Выберите папку проекта');
   const cleanMessage = typeof message === 'string' && message.trim() ? message.trim() : 'Обновлены файлы проекта';
+  if (gitProvider === 'gitea') {
+    const giteaData = await buildGiteaFolderChanges(owner, repo, ref, cleanFolderPath);
+    return commitGiteaFolderChanges(owner, repo, ref, giteaData, cleanMessage);
+  }
   const data = await buildFolderChanges(owner, repo, ref, cleanFolderPath);
   if (data.changes.length === 0) return { sha: data.branchState.headSha, changed: false };
   const commit = await commitTreeChanges(
@@ -2345,9 +2646,13 @@ ipcMain.handle('app:download-archive', result(async (_event, { owner, repo, sha,
   if (!validRepo(owner, repo)) throw new Error('РќРµРєРѕСЂСЂРµРєС‚РЅРѕРµ РёРјСЏ СЂРµРїРѕР·РёС‚РѕСЂРёСЏ');
   if (!isValidGitSha(sha)) throw new Error('Некорректный SHA коммита');
 
-  const url = `${GITHUB_ORIGIN}/${owner}/${repo}/archive/${sha}.zip`;
+  const url = gitProvider === 'gitea'
+    ? `${giteaBaseUrl}/${owner}/${repo}/archive/${sha}.zip`
+    : `${GITHUB_ORIGIN}/${owner}/${repo}/archive/${sha}.zip`;
   const response = await fetch(url, {
-    headers: githubToken ? { Authorization: `Bearer ${githubToken}` } : {},
+    headers: githubToken
+      ? (gitProvider === 'gitea' ? giteaHeaders(githubToken) : { Authorization: `Bearer ${githubToken}` })
+      : {},
   });
 
   if (!response.ok) throw new Error('РќРµ СѓРґР°Р»РѕСЃСЊ СЃРєР°С‡Р°С‚СЊ Р°СЂС…РёРІ');

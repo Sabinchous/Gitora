@@ -230,6 +230,7 @@ export const TeamPanel: React.FC<TeamPanelProps> = ({ onShowCommits }) => {
     removeTeamCollaborator,
     cancelTeamInvitation,
     openExternal,
+    userWebUrl,
   } = useApp();
   const [section, setSection] = useState<TeamSection>('collaborators');
   const [selectedCollaborator, setSelectedCollaborator] = useState<GitHubCollaborator | null>(null);
@@ -299,7 +300,7 @@ export const TeamPanel: React.FC<TeamPanelProps> = ({ onShowCommits }) => {
   const selectedPermission = selectedCollaborator ? collaboratorPermission(selectedCollaborator) : 'pull';
   const openProfile = (login: string, url?: string) => {
     if (url) void openExternal(url);
-    else if (login) void openExternal(`https://github.com/${login}`);
+    else if (login) void openExternal(userWebUrl(login));
   };
   const changePermission = async (permission: GitHubCollaboratorPermission) => {
     if (!selectedCollaborator || permission === selectedPermission) return;

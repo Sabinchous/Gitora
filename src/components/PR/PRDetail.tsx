@@ -211,6 +211,7 @@ export const PRDetail: React.FC = () => {
     mergePullRequest,
     updatePullRequestState,
     openExternal,
+    providerLabel,
   } = useApp();
   const [detail, setDetail] = useState<GitHubPR | null>(selectedPR);
   const [files, setFiles] = useState<GitHubPRFile[]>([]);
@@ -450,7 +451,7 @@ export const PRDetail: React.FC = () => {
 
         <button type="button" className="mt-3 flex h-10 w-full items-center justify-center gap-2 rounded-lg border border-[var(--line)] text-sm font-semibold hover:bg-[var(--surface-soft)]" onClick={() => void openExternal(activePR.html_url)}>
           <ExternalLink size={16} />
-          Открыть на GitHub
+          Открыть на {providerLabel}
         </button>
       </div>
 

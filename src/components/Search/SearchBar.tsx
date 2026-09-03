@@ -9,7 +9,7 @@ interface SearchBarProps {
 }
 
 export const SearchBar: React.FC<SearchBarProps> = ({ owner, repo }) => {
-  const { searchCommits, commits, setSelectedCommit, openExternal } = useApp();
+  const { searchCommits, commits, setSelectedCommit, openExternal, commitWebUrl } = useApp();
   const [query, setQuery] = useState('');
   const [author, setAuthor] = useState('');
   const [since, setSince] = useState('');
@@ -79,7 +79,7 @@ export const SearchBar: React.FC<SearchBarProps> = ({ owner, repo }) => {
       setSelectedCommit(loadedCommit);
       return;
     }
-    void openExternal(`https://github.com/${owner}/${repo}/commit/${commit.sha}`);
+    void openExternal(commitWebUrl(`${owner}/${repo}`, commit.sha));
   };
 
   return (

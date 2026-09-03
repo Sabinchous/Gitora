@@ -15,6 +15,8 @@ const WRITE_ENDPOINTS = [
   { method: 'POST', pattern: /^\/repos\/[^/]+\/[^/]+\/git\/refs$/ },
   { method: 'PATCH', pattern: /^\/repos\/[^/]+\/[^/]+\/git\/refs\/heads\/.+$/ },
   { method: 'PUT', pattern: /^\/repos\/[^/]+\/[^/]+\/contents\/.+$/ },
+  // Gitea creates files via POST contents (GitHub uses PUT for both).
+  { method: 'POST', pattern: /^\/repos\/[^/]+\/[^/]+\/contents\/.+$/ },
   { method: 'POST', pattern: /^\/repos\/[^/]+\/[^/]+\/issues$/ },
   { method: 'POST', pattern: /^\/repos\/[^/]+\/[^/]+\/issues\/\d+\/comments$/ },
   { method: 'POST', pattern: /^\/repos\/[^/]+\/[^/]+\/pulls$/ },

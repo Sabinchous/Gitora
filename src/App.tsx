@@ -80,6 +80,8 @@ export const App: React.FC = () => {
     setChangesOpen,
     openExternal,
     syncAllData,
+    repoWebUrl,
+    providerLabel,
   } = useApp();
 
   const [activeTab, setActiveTab] = useState<'graph' | 'pr' | 'issues' | 'team'>('graph');
@@ -89,7 +91,7 @@ export const App: React.FC = () => {
 
   const copyRepositoryUrl = async () => {
     if (!project) return;
-    await navigator.clipboard.writeText(`https://github.com/${project.repo}`);
+    await navigator.clipboard.writeText(repoWebUrl(project.repo));
     notify('Ссылка на репозиторий скопирована');
   };
 
@@ -127,7 +129,7 @@ export const App: React.FC = () => {
 
           <button
             className="ml-auto w-8 h-8 flex-none rounded-full overflow-hidden bg-[#261732] text-[#E7E0D6] text-xs font-extrabold grid place-items-center"
-            aria-label={connected ? `GitHub: ${user?.login}` : 'Подключиться с PAT'}
+            aria-label={connected ? `${providerLabel}: ${user?.login}` : 'Подключиться с PAT'}
             onClick={() => !connected && setLoginOpen(true)}
           >
             {user?.avatar_url
@@ -237,7 +239,7 @@ export const App: React.FC = () => {
                     { id: 'edit', label: 'Редактировать', icon: Pencil, onSelect: () => setEditOpen(true), dividerBefore: true },
                     { id: 'branches', label: 'Управление ветками', icon: GitBranch, onSelect: () => { setBranchStartTab('list'); setBranchOpen(true); } },
                     { id: 'copy-link', label: 'Копировать ссылку', icon: Link2, onSelect: () => void copyRepositoryUrl() },
-                    { id: 'github', label: 'Открыть на GitHub', icon: Code2, onSelect: () => void openExternal(`https://github.com/${project.repo}`), external: true },
+                    { id: 'github', label: `Открыть на ${providerLabel}`, icon: Code2, onSelect: () => void openExternal(repoWebUrl(project.repo)), external: true },
                   ]}
                 />
               </div>

@@ -37,6 +37,8 @@ import {
   GitHubRepo,
   GitHubUser,
   GitHubApiResult,
+  GitProviderInfo,
+  LoginInput,
   TeamLoadState,
   Project,
   Release,
@@ -78,6 +80,8 @@ interface AppState {
   repositoryInfo: GitHubRepo | null;
   user: GitHubUser | null;
   connected: boolean;
+  provider: GitProviderInfo;
+  providerLabel: string;
   loading: boolean;
   error: string | null;
   graphLayout: GraphLayoutResult | null;
@@ -128,9 +132,12 @@ interface AppContextType extends AppState {
   setChangesOpen: (open: boolean) => void;
   setAiOpen: (open: boolean) => void;
   notify: (text: string) => void;
-  login: (token: string) => Promise<void>;
+  login: (input: LoginInput) => Promise<void>;
   clearConnectionError: () => void;
   logout: () => Promise<void>;
+  repoWebUrl: (fullName: string) => string;
+  userWebUrl: (login: string) => string;
+  commitWebUrl: (fullName: string, sha: string) => string;
   createRepo: (name: string, description: string, isPrivate: boolean, folderPath?: string, options?: CreateRepositoryOptions) => Promise<CreateRepositoryResult | null>;
   deleteRepo: (owner: string, repo: string) => Promise<boolean>;
   updateRepo: (owner: string, repo: string, data: { name?: string; description?: string; private?: boolean }) => Promise<boolean>;
@@ -380,6 +387,31 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [repositoryCommits, setRepositoryCommits] = useState<GitHubCommit[]>([]);
   const [user, setUser] = useState<GitHubUser | null>(null);
   const [connected, setConnected] = useState(false);
+  const [provider, setProvider] = useState<GitProviderInfo>({ provider: 'github', baseUrl: '' });
+  const providerLabel = provider.provider === 'gitea' ? 'Gitea' : 'GitHub';
+
+  const applyProvider = (data?: { provider?: string; baseUrl?: string } | null) => {
+    if (data?.provider === 'gitea') {
+      setProvider({ provider: 'gitea', baseUrl: typeof data.baseUrl === 'string' ? data.baseUrl : '' });
+    } else {
+      setProvider({ provider: 'github', baseUrl: '' });
+    }
+  };
+
+  const repoWebUrl = (fullName: string): string => {
+    const name = String(fullName || '').replace(/^\/+/, '');
+    if (provider.provider === 'gitea' && provider.baseUrl) return `${provider.baseUrl}/${name}`;
+    return `https://github.com/${name}`;
+  };
+
+  const userWebUrl = (login: string): string => {
+    const name = String(login || '').replace(/^\/+/, '');
+    if (provider.provider === 'gitea' && provider.baseUrl) return `${provider.baseUrl}/${name}`;
+    return `https://github.com/${name}`;
+  };
+
+  const commitWebUrl = (fullName: string, sha: string): string =>
+    `${repoWebUrl(fullName)}/commit/${sha}`;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [graphLayout, setGraphLayout] = useState<GraphLayoutResult | null>(null);
@@ -570,16 +602,17 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       : nextProjects[0] ?? null);
   };
 
-  const login = async (token: string) => {
+  const login = async (input: LoginInput) => {
     if (!window.electronAPI) {
       showError('Авторизация доступна в приложении Gitora');
       return;
     }
     setLoading(true);
     setError(null);
-    const result = await window.electronAPI.github.login(token);
+    const result = await window.electronAPI.github.login(input);
     if (result.success && result.data) {
       setUser(result.data);
+      applyProvider(result.data);
       setConnected(true);
       clearConnectionError();
       setLoginOpen(false);
@@ -594,6 +627,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     await window.electronAPI?.github.logout();
     requestId.current += 1;
     setConnected(false);
+    setProvider({ provider: 'github', baseUrl: '' });
     setUser(null);
     setProjects([]);
     setProject(null);
@@ -612,7 +646,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setGraphLayout(null);
     setLastUpdatedAt(null);
     setConnectionFailure(null);
-    notify('GitHub отключён');
+    notify(`${providerLabel} отключён`);
   };
 
   const createRepo = async (name: string, description: string, isPrivate: boolean, folderPath?: string, options?: CreateRepositoryOptions): Promise<CreateRepositoryResult | null> => {
@@ -631,7 +665,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       } else if (data.uploadStatus === 'success') {
         notify(`Проект «${name}» создан с ${data.uploadedCount} файлами`);
       } else {
-        notify(`Проект «${name}» создан в GitHub`);
+        notify(`Проект «${name}» создан в ${providerLabel}`);
       }
       await loadRepos();
       return data;
@@ -1473,6 +1507,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       }
       if (sessionResult.success && sessionResult.data) {
         setUser(sessionResult.data);
+        applyProvider(sessionResult.data);
         setConnected(true);
         await loadRepos();
       } else {
@@ -1573,6 +1608,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       login,
       clearConnectionError,
       logout,
+      provider,
+      providerLabel,
+      repoWebUrl,
+      userWebUrl,
+      commitWebUrl,
       createRepo,
       deleteRepo,
       updateRepo,

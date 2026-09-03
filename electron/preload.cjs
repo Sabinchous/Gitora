@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron');
 contextBridge.exposeInMainWorld('electronAPI', {
   github: {
     login: (token) => ipcRenderer.invoke('github:login', token),
+    getProvider: () => ipcRenderer.invoke('provider:get'),
     restoreSession: () => ipcRenderer.invoke('github:restore-session'),
     logout: () => ipcRenderer.invoke('github:logout'),
     getRepos: () => ipcRenderer.invoke('github:repos'),

@@ -72,6 +72,23 @@ export interface GitHubUser {
   type?: 'User' | 'Organization' | string;
 }
 
+export type GitProviderKind = 'github' | 'gitea';
+
+export interface GitProviderInfo {
+  provider: GitProviderKind;
+  baseUrl: string;
+}
+
+export type LoginInput =
+  | string
+  | { provider: 'github'; token: string }
+  | { provider: 'gitea'; token: string; baseUrl: string };
+
+export interface AuthenticatedUser extends GitHubUser {
+  provider: GitProviderKind;
+  baseUrl: string;
+}
+
 export type GitHubCollaboratorPermission = 'pull' | 'triage' | 'push' | 'maintain' | 'admin';
 export type GitHubTeamRole = 'Read' | 'Triage' | 'Write' | 'Maintain' | 'Admin';
 export type TeamLoadState = 'idle' | 'loading' | 'loaded' | 'empty' | 'forbidden' | 'error' | 'pending';
@@ -527,8 +544,9 @@ export interface DownloadOptions {
 
 export interface ElectronAPI {
   github: {
-    login: (token: string) => Promise<GitHubApiResult<GitHubUser>>;
-    restoreSession: () => Promise<GitHubApiResult<GitHubUser | null>>;
+    login: (token: LoginInput) => Promise<GitHubApiResult<AuthenticatedUser>>;
+    getProvider: () => Promise<GitHubApiResult<GitProviderInfo>>;
+    restoreSession: () => Promise<GitHubApiResult<AuthenticatedUser | null>>;
     logout: () => Promise<GitHubApiResult<null>>;
     getRepos: () => Promise<GitHubApiResult<GitHubRepo[]>>;
     getLatestCommit: (owner: string, repo: string) => Promise<GitHubApiResult<GitHubCommit | null>>;
