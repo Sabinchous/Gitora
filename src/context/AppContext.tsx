@@ -609,6 +609,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
     setLoading(true);
     setError(null);
+    const providerName = typeof input === 'object' && input?.provider === 'gitea' ? 'Gitea' : 'GitHub';
     const result = await window.electronAPI.github.login(input);
     if (result.success && result.data) {
       setUser(result.data);
@@ -618,7 +619,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       setLoginOpen(false);
       await loadRepos();
     } else {
-      showConnectionError(result.errorCode, result.error || 'Не удалось подключить GitHub');
+      showConnectionError(result.errorCode, result.error || `Не удалось подключить ${providerName}`);
     }
     setLoading(false);
   };

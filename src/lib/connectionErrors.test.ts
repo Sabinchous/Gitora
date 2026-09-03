@@ -16,4 +16,10 @@ describe('connectionError', () => {
     expect(error.actionKind).toBe('reauthorize');
     expect(error.description).not.toContain('идентификатор приложения');
   });
+
+  it('surfaces the backend message for unknown failures', () => {
+    const error = connectionError('gitea', 'Gitea вернул ошибку 403');
+    expect(error.kind).toBe('unknown');
+    expect(error.description).toBe('Gitea вернул ошибку 403');
+  });
 });
