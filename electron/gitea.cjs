@@ -650,8 +650,10 @@ function applyMap(kind, data, translation) {
 }
 
 function giteaErrorFromResponse(status, data, githubEndpoint, method) {
+  const serverMessage = data && (data.message || data.error) ? String(data.message || data.error) : '';
+  const suffix = serverMessage ? `: ${serverMessage}` : '';
   if (status === 401 || status === 403) {
-    const error = new Error('Gitea отклонил токен: проверьте токен и адрес сервера');
+    const error = new Error(`Gitea отклонил запрос (status ${status}${suffix}). Проверьте токен и адрес сервера`);
     error.code = 'auth';
     error.status = status;
     return error;

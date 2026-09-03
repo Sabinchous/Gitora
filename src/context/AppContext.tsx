@@ -451,7 +451,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const showConnectionError = (errorCode?: string, message?: string) => {
-    setConnectionFailure(connectionError(errorCode, message));
+    setConnectionFailure(connectionError(errorCode, message, providerLabel));
   };
 
   const clearConnectionError = () => setConnectionFailure(null);

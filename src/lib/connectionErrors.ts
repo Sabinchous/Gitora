@@ -53,26 +53,34 @@ const ERROR_COPY: Record<ConnectionErrorKind, Omit<ConnectionErrorInfo, 'kind'>>
   },
 };
 
-export function connectionError(kind?: string, fallback?: string): ConnectionErrorInfo {
+export function connectionError(kind?: string, fallback?: string, providerLabel = 'GitHub'): ConnectionErrorInfo {
+  const localize = (info: Omit<ConnectionErrorInfo, 'kind'>): Omit<ConnectionErrorInfo, 'kind'> => {
+    if (!providerLabel || providerLabel === 'GitHub') return info;
+    return {
+      ...info,
+      title: info.title.replace(/GitHub/g, providerLabel),
+      description: info.description.replace(/GitHub/g, providerLabel),
+    };
+  };
   const normalized = (kind || '').trim() as ConnectionErrorKind;
-  if (normalized in ERROR_COPY) return { kind: normalized, ...ERROR_COPY[normalized] };
+  if (normalized in ERROR_COPY) return { kind: normalized, ...localize(ERROR_COPY[normalized]) };
 
   const message = (fallback || '').toLowerCase();
   if (message.includes('интернет') || message.includes('fetch') || message.includes('network')) {
-    return { kind: 'network', ...ERROR_COPY.network };
+    return { kind: 'network', ...localize(ERROR_COPY.network) };
   }
   if (message.includes('прав') || message.includes('permission') || message.includes('forbidden')) {
-    return { kind: 'permissions', ...ERROR_COPY.permissions };
+    return { kind: 'permissions', ...localize(ERROR_COPY.permissions) };
   }
   if (message.includes('токен') || message.includes('авторизац') || message.includes('credentials')) {
-    return { kind: 'auth', ...ERROR_COPY.auth };
+    return { kind: 'auth', ...localize(ERROR_COPY.auth) };
   }
   // Unknown backend failure: surface the real message so users (and logs)
   // can diagnose provider-specific problems instead of a generic panel.
   const trimmedFallback = (fallback || '').trim();
   if (trimmedFallback) {
     const description = trimmedFallback.length > 300 ? `${trimmedFallback.slice(0, 300)}…` : trimmedFallback;
-    return { kind: 'unknown', ...ERROR_COPY.unknown, description };
+    return { kind: 'unknown', ...localize(ERROR_COPY.unknown), description };
   }
-  return { kind: 'unknown', ...ERROR_COPY.unknown };
+  return { kind: 'unknown', ...localize(ERROR_COPY.unknown) };
 }

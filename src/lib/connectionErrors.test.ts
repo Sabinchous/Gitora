@@ -22,4 +22,10 @@ describe('connectionError', () => {
     expect(error.kind).toBe('unknown');
     expect(error.description).toBe('Gitea вернул ошибку 403');
   });
+
+  it('localizes provider mentions for non-GitHub providers', () => {
+    const error = connectionError('auth', undefined, 'Gitea');
+    expect(error.title).toContain('Gitea');
+    expect(error.title).not.toContain('GitHub');
+  });
 });
