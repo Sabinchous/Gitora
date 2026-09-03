@@ -701,6 +701,19 @@ async function giteaRequestPage({ apiOrigin, token, githubEndpoint, options = {}
   const data = response.status === 204 ? null : await response.json().catch(() => null);
   if (!response.ok) throw giteaErrorFromResponse(response.status, data, githubEndpoint, method);
 
+  // Gitea behind an auth proxy may answer 200 with an HTML login page instead
+  // of JSON (e.g. REQUIRE_SIGNIN_VIEW setups). Surface that explicitly.
+  if (data == null) {
+    const contentType = response.headers.get('content-type') || 'unknown';
+    const error = new Error(
+      `Gitea вернул пустой ответ для ${method} ${githubEndpoint} (status ${response.status}, ${contentType}). ` +
+      'Проверьте токен и то, что API доступно напрямую без веб-авторизации.',
+    );
+    error.code = 'gitea-empty';
+    error.status = response.status;
+    throw error;
+  }
+
   return {
     data: applyMap(translation.map, data, translation),
     status: response.status,

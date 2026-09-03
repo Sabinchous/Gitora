@@ -1494,6 +1494,9 @@ ipcMain.handle('github:login', result(async (_event, token) => {
   giteaBaseUrl = session.baseUrl;
   const cleanToken = session.token;
   const user = await githubRequest('/user', {}, cleanToken);
+  if (!user || !user.login) {
+    throw new Error('Сервер не вернул профиль пользователя. Проверьте токен и доступность API.');
+  }
   await saveToken(cleanToken);
   githubToken = cleanToken;
   githubTokenSource = 'new-login';

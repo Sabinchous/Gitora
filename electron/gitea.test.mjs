@@ -14,6 +14,7 @@ const {
   mapGitHubPermissionToGitea,
   normalizeGiteaBaseUrl,
   translateGithubToGitea,
+  giteaRequestPage,
 } = require('./gitea.cjs');
 
 describe('Gitea base URL normalization', () => {
@@ -155,5 +156,27 @@ describe('client-side commit search', () => {
     expect(filterGiteaCommits(commits, { author: 'sam' }).map(commit => commit.sha)).toEqual(['2']);
     expect(filterGiteaCommits(commits, { since: '2026-01-15' }).map(commit => commit.sha)).toEqual(['1']);
     expect(filterGiteaCommits(commits, { until: '2026-01-15' }).map(commit => commit.sha)).toEqual(['2']);
+  });
+});
+
+describe('Gitea empty responses', () => {
+  it('reports a clear error when the server answers 200 without JSON', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async () => ({
+      ok: true,
+      status: 200,
+      headers: { get: (name) => (String(name).toLowerCase() === 'content-type' ? 'text/html' : '') },
+      json: async () => { throw new SyntaxError('Unexpected token'); },
+    });
+    try {
+      let error = null;
+      try {
+        await giteaRequestPage({ apiOrigin: 'https://gitea.example.com/api/v1', token: 'x', githubEndpoint: '/user', options: {} });
+      } catch (candidate) { error = candidate; }
+      expect(error && error.code).toBe('gitea-empty');
+      expect(String(error && error.message)).toContain('status 200');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });
