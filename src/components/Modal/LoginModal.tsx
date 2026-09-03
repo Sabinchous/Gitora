@@ -73,6 +73,16 @@ export const LoginModal: React.FC = () => {
           <X size={19} />
         </button>
 
+        {provider === 'gitea' && (
+          <button
+            type="button"
+            className="mb-4 text-xs font-semibold text-[#7D7482] underline"
+            disabled={loading}
+            onClick={() => switchProvider('github')}
+          >
+            ← Назад к GitHub
+          </button>
+        )}
         <div className="w-14 h-14 rounded-2xl bg-[#261732] grid place-items-center mb-6">
           <Github size={28} className="text-[#E7E0D6]" />
         </div>
@@ -84,24 +94,6 @@ export const LoginModal: React.FC = () => {
             ? 'Укажите адрес своего Gitea-сервера и токен доступа, чтобы работать с репозиториями, коммитами и ветками.'
             : 'Вставьте Personal Access Token, чтобы получить доступ к репозиториям, коммитам и веткам.'}
         </p>
-
-        <div className="grid grid-cols-2 gap-2 p-1 rounded-xl bg-[#F3EFE9] mb-5" role="tablist" aria-label="Выбор провайдера">
-          {(['github', 'gitea'] as GitProviderKind[]).map((kind) => (
-            <button
-              key={kind}
-              type="button"
-              role="tab"
-              aria-selected={provider === kind}
-              disabled={loading}
-              onClick={() => switchProvider(kind)}
-              className={`h-9 rounded-lg text-sm font-semibold transition-colors ${
-                provider === kind ? 'bg-[#261732] text-[#E7E0D6]' : 'text-[#7D7482]'
-              }`}
-            >
-              {kind === 'github' ? 'GitHub' : 'Gitea'}
-            </button>
-          ))}
-        </div>
 
         {connectionError && (
           <div className="mb-5">
@@ -201,6 +193,18 @@ export const LoginModal: React.FC = () => {
               {loading ? 'Проверка…' : <>Подключиться <ArrowRight size={16} /></>}
             </button>
           </div>
+          {provider === 'github' && (
+            <div className="mt-4 text-center">
+              <button
+                type="button"
+                className="text-xs text-[#7D7482] underline"
+                disabled={loading}
+                onClick={() => switchProvider('gitea')}
+              >
+                Войти через другой git-хостинг (Gitea)
+              </button>
+            </div>
+          )}
         </form>
       </div>
     </div>
