@@ -36,6 +36,19 @@
 - Замер: время холодного старта, память, работает ли сеть к github/gitea.
 - Выход фазы: GO/NO-GO по Sandbox + цифры стартового времени.
 
+**Итог спайка (2026-09-08, Windows 10 Pro 19045, verdict: GO):**
+- Sandbox включается фичей `Containers-DisposableClientVM` (нужны админ-права + ребут).
+- `.wsb` с `MappedFolder` + `LogonCommand`: работает, двусторонняя общая папка,
+  маркер из VM виден хосту. Загрузка песочницы ~30–60 с.
+- `winget` в образе Sandbox **отсутствует** — ставить SDK через `dotnet-install.ps1`
+  (https://dot.net/v1/dotnet-install.ps1), сеть внутри есть.
+- Холодный старт: SDK 10.0.400 (300 МБ, скачивание+распаковка) ~4.3 мин;
+  `dotnet build -c Release` тестового WinForms — 5.26 с; `MiniApp.exe` жив
+  (виден в tasklist, окно на экране). Вся сессия ~4.5 мин.
+- Вывод для фазы 2: качать SDK каждый раз — главный налог. Решение: хост качает
+  SDK один раз и пробрасывает папку в Sandbox read-only (`DOTNET_ROOT`),
+  либо закэшированный VHDX. Тогда холодный старт ≈ загрузка + сборка (~1 мин).
+
 ### 1. Модель сессии + IPC
 - Сущность `CommitSession`: `{ id, repo, sha, launchFile, vmId, state }`.
 - IPC: `session:start { owner, repo, sha, launchFile }`, `session:stop { id }`,
