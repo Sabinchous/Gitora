@@ -113,6 +113,7 @@ export interface CommitSession {
   launchFile: string;
   state: CommitSessionState;
   createdAt: string;
+  expiresAt?: string;
 }
 
 export interface SessionStartInput {
@@ -120,6 +121,15 @@ export interface SessionStartInput {
   repo: string;
   sha: string;
   launchFile: string;
+  memoryMb?: number;
+  networking?: boolean;
+  maxAgeMinutes?: number;
+}
+
+export interface SessionLog {
+  id: string;
+  state: CommitSessionState;
+  log: string;
 }
 
 export type GitHubCollaboratorPermission = 'pull' | 'triage' | 'push' | 'maintain' | 'admin';
@@ -584,6 +594,7 @@ export interface ElectronAPI {
     startSession: (input: SessionStartInput) => Promise<GitHubApiResult<CommitSession>>;
     stopSession: (id: string) => Promise<GitHubApiResult<{ id: string; state: CommitSessionState }>>;
     listSessions: () => Promise<GitHubApiResult<CommitSession[]>>;
+    getSessionLog: (id: string) => Promise<GitHubApiResult<SessionLog>>;
     restoreSession: () => Promise<GitHubApiResult<SessionUser | null>>;
     logout: () => Promise<GitHubApiResult<null>>;
     getRepos: () => Promise<GitHubApiResult<GitHubRepo[]>>;

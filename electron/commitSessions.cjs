@@ -13,6 +13,11 @@ const SESSION_STATES = ['starting', 'running', 'stopping', 'gone'];
 const RUNNABLE_EXTENSIONS = ['.csproj', '.vbproj', '.fsproj'];
 const BUILDABLE_EXTENSIONS = [...RUNNABLE_EXTENSIONS, '.sln', '.slnx'];
 const LAUNCH_FILE_PATTERN = /^[A-Za-z0-9._\-/ ]+$/;
+// Pinned SDK for the host cache (matches the dev environment).
+const PINNED_DOTNET_SDK = '10.0.400';
+const DOTNET_SDK_URL = `https://builds.dotnet.microsoft.com/dotnet/Sdk/${PINNED_DOTNET_SDK}/dotnet-sdk-${PINNED_DOTNET_SDK}-win-x64.zip`;
+const DEFAULT_MAX_AGE_MINUTES = 240;
+const DEFAULT_MEMORY_MB = 4096;
 
 function isRunnableLaunchFile(file) {
   return RUNNABLE_EXTENSIONS.some(ext => String(file || '').toLowerCase().endsWith(ext));
@@ -57,26 +62,91 @@ function escapeXml(value) {
     .replace(/"/g, '&quot;');
 }
 
-function buildWsb({ hostFolder, sandboxFolder = 'C:\\gitora', logonCommand, memoryMb = 4096 }) {
+function buildWsb({ hostFolder, sandboxFolder = 'C:\\gitora', logonCommand, memoryMb = DEFAULT_MEMORY_MB, networking = true, extraFolders = [] }) {
   if (!hostFolder || !path.isAbsolute(hostFolder)) throw new Error('Некорректная папка сессии');
   if (!logonCommand) throw new Error('Пустая команда запуска VM');
-  const memory = memoryMb === undefined ? 4096 : Number(memoryMb);
+  const memory = memoryMb === undefined ? DEFAULT_MEMORY_MB : Number(memoryMb);
   if (!Number.isInteger(memory) || memory < 1024 || memory > 32768) {
     throw new Error('Некорректный лимит памяти VM (1024–32768 МБ)');
   }
+  const folders = [{ hostFolder, sandboxFolder, readOnly: false }];
+  for (const extra of extraFolders) {
+    if (!extra || !extra.hostFolder || !path.isAbsolute(extra.hostFolder) || !extra.sandboxFolder) {
+      throw new Error('Некорректная дополнительная папка VM');
+    }
+    folders.push({ hostFolder: extra.hostFolder, sandboxFolder: extra.sandboxFolder, readOnly: extra.readOnly !== false });
+  }
+  const mapped = folders.map(folder => `    <MappedFolder>\r\n`
+    + `      <HostFolder>${escapeXml(folder.hostFolder)}</HostFolder>\r\n`
+    + `      <SandboxFolder>${escapeXml(folder.sandboxFolder)}</SandboxFolder>\r\n`
+    + `      <ReadOnly>${folder.readOnly ? 'true' : 'false'}</ReadOnly>\r\n`
+    + `    </MappedFolder>\r\n`).join('');
   return `<Configuration>\r\n`
     + `  <MemoryInMB>${memory}</MemoryInMB>\r\n`
+    + `  <Networking>${networking === false ? 'Disable' : 'Enable'}</Networking>\r\n`
     + `  <MappedFolders>\r\n`
-    + `    <MappedFolder>\r\n`
-    + `      <HostFolder>${escapeXml(hostFolder)}</HostFolder>\r\n`
-    + `      <SandboxFolder>${escapeXml(sandboxFolder)}</SandboxFolder>\r\n`
-    + `      <ReadOnly>false</ReadOnly>\r\n`
-    + `    </MappedFolder>\r\n`
+    + mapped
     + `  </MappedFolders>\r\n`
     + `  <LogonCommand>\r\n`
     + `    <Command>${escapeXml(logonCommand)}</Command>\r\n`
     + `  </LogonCommand>\r\n`
     + `</Configuration>\r\n`;
+}
+
+// Wrapper run as LogonCommand when a host SDK cache is mapped read-only:
+// pre-seeds the environment so provision skips the SDK download.
+function buildSdkWrapper() {
+  return '@echo off\r\n'
+    + 'set "DOTNET_ROOT=C:\\sdkcache"\r\n'
+    + 'set "PATH=C:\\sdkcache;%PATH%"\r\n'
+    + 'set DOTNET_CLI_TELEMETRY_OPTOUT=1\r\n'
+    + 'set DOTNET_NOLOGO=1\r\n'
+    + 'call C:\\gitora\\provision.cmd\r\n';
+}
+
+// Full session input validation + defaults. Pure and unit-tested; main.cjs
+// trusts only its output.
+function normalizeSessionInput(input) {
+  const data = input && typeof input === 'object' ? input : {};
+  const owner = typeof data.owner === 'string' ? data.owner : '';
+  const repo = typeof data.repo === 'string' ? data.repo : '';
+  const sha = typeof data.sha === 'string' ? data.sha : '';
+  if (!/^[A-Za-z0-9_.-]+$/.test(owner) || owner === '.' || owner === '..') {
+    throw new Error('Некорректное имя владельца репозитория');
+  }
+  if (!/^[A-Za-z0-9_.-]+$/.test(repo) || repo === '.' || repo === '..') {
+    throw new Error('Некорректное имя репозитория');
+  }
+  if (!/^[0-9a-f]{40}$/i.test(sha)) throw new Error('Некорректный SHA коммита');
+  const launchFile = validateLaunchFile(data.launchFile);
+  const memoryMb = data.memoryMb === undefined ? DEFAULT_MEMORY_MB : Number(data.memoryMb);
+  if (!Number.isInteger(memoryMb) || memoryMb < 1024 || memoryMb > 32768) {
+    throw new Error('Некорректный лимит памяти VM (1024–32768 МБ)');
+  }
+  const maxAgeMinutes = data.maxAgeMinutes === undefined ? DEFAULT_MAX_AGE_MINUTES : Number(data.maxAgeMinutes);
+  if (!Number.isFinite(maxAgeMinutes) || maxAgeMinutes < 5 || maxAgeMinutes > 1440) {
+    throw new Error('Некорректный лимит времени сессии (5–1440 минут)');
+  }
+  return { owner, repo, sha, launchFile, memoryMb, networking: data.networking !== false, maxAgeMinutes };
+}
+
+function sdkCacheDir(userDataDir) {
+  return path.join(userDataDir, 'gitora-sdkcache');
+}
+
+// Parses `dotnet --list-sdks` output; true when a 10.x SDK is present.
+function hasDotnet10(listSdksOutput) {
+  return String(listSdksOutput || '').split('\n').some(line => /^\s*10\.\d+\.\d+\s+\[/.test(line));
+}
+
+// Tail helper for session:log (host reads the mapped session.log).
+function tailText(text, maxBytes = 65536) {
+  const value = String(text || '');
+  if (Buffer.byteLength(value, 'utf8') <= maxBytes) return value;
+  const buf = Buffer.from(value, 'utf8');
+  let start = buf.length - maxBytes;
+  while (start < buf.length && (buf[start] & 0xc0) === 0x80) start += 1;
+  return '…\n' + buf.slice(start).toString('utf8');
 }
 
 // Provisioning script run once at VM logon. Installs .NET SDK when missing
@@ -149,16 +219,25 @@ function isAlive(pid) {
 
 module.exports = {
   BUILDABLE_EXTENSIONS,
+  DEFAULT_MAX_AGE_MINUTES,
+  DEFAULT_MEMORY_MB,
+  DOTNET_SDK_URL,
+  PINNED_DOTNET_SDK,
   RUNNABLE_EXTENSIONS,
   SESSION_STATES,
   buildProvisionScript,
+  buildSdkWrapper,
   buildWsb,
   detectLaunchFile,
   escapeXml,
+  hasDotnet10,
   isAlive,
   isRunnableLaunchFile,
   newSession,
+  normalizeSessionInput,
+  sdkCacheDir,
   sessionDir,
   sessionsRoot,
+  tailText,
   validateLaunchFile,
 };

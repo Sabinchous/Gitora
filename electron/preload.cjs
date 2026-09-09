@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     startSession: (input) => ipcRenderer.invoke('session:start', input),
     stopSession: (id) => ipcRenderer.invoke('session:stop', id),
     listSessions: () => ipcRenderer.invoke('session:list'),
+    getSessionLog: (id) => ipcRenderer.invoke('session:log', id),
     restoreSession: () => ipcRenderer.invoke('github:restore-session'),
     logout: () => ipcRenderer.invoke('github:logout'),
     getRepos: () => ipcRenderer.invoke('github:repos'),

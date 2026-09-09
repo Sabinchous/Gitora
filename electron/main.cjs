@@ -611,6 +611,7 @@ function publicSession(entry) {
     launchFile: entry.launchFile,
     state: entry.state,
     createdAt: entry.createdAt,
+    ...(entry.expiresAt ? { expiresAt: new Date(entry.expiresAt).toISOString() } : {}),
   };
 }
 
@@ -628,11 +629,56 @@ async function killSessionVm(entry) {
   } catch {}
 }
 
+async function runDotnetListSdks(dotnetExe) {
+  try {
+    const { stdout } = await execFileAsync(dotnetExe, ['--list-sdks'], {
+      windowsHide: true,
+      encoding: 'utf8',
+      timeout: 60000,
+      env: { ...process.env, DOTNET_CLI_TELEMETRY_OPTOUT: '1', DOTNET_NOLOGO: '1' },
+    });
+    return String(stdout || '');
+  } catch {
+    return '';
+  }
+}
+
+// Host SDK cache for sessions (phase 2): reuse beats a 300MB download per run.
+// Priority: existing cache → machine-wide install (mapped, never copied) →
+// one-time download. Returns the host dir to map read-only, or ''.
+async function ensureHostSdk() {
+  const cache = commitSessions.sdkCacheDir(app.getPath('userData'));
+  if (commitSessions.hasDotnet10(await runDotnetListSdks(path.join(cache, 'dotnet.exe')))) return cache;
+  const machineDir = 'C:\\Program Files\\dotnet';
+  if (commitSessions.hasDotnet10(await runDotnetListSdks(path.join(machineDir, 'dotnet.exe')))) return machineDir;
+  try {
+    await fs.mkdir(cache, { recursive: true });
+    const zipPath = path.join(cache, 'dotnet-sdk.zip');
+    const response = await fetch(commitSessions.DOTNET_SDK_URL, { signal: AbortSignal.timeout(10 * 60 * 1000) });
+    if (!response.ok) throw new Error(`status ${response.status}`);
+    await streamResponseToFile(response, zipPath, 'SDK превышает лимит 512 МБ');
+    await execFileAsync('powershell.exe', ['-NoProfile', '-Command', `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${cache}' -Force`], { windowsHide: true });
+    await fs.rm(zipPath, { force: true });
+    if (commitSessions.hasDotnet10(await runDotnetListSdks(path.join(cache, 'dotnet.exe')))) return cache;
+  } catch (error) {
+    console.error('[sessions] sdk cache failed:', error instanceof Error ? error.message : error);
+  }
+  return '';
+}
+
 async function refreshSessionLiveness(entry) {
   if (entry.state !== 'running' && entry.state !== 'starting') return true;
   if (!commitSessions.isAlive(entry.pid)) {
     entry.state = 'gone';
     void removeSessionDir(entry.dir);
+    commitSessionRegistry.delete(entry.id);
+    return false;
+  }
+  // Auto-stop after the session lifetime expires.
+  if (entry.expiresAt && Date.now() > entry.expiresAt) {
+    entry.state = 'stopping';
+    await killSessionVm(entry);
+    await removeSessionDir(entry.dir);
     commitSessionRegistry.delete(entry.id);
     return false;
   }
@@ -1795,12 +1841,8 @@ ipcMain.handle('github:remove-account', result(async (_event, id) => {
 ipcMain.handle('provider:get', result(async () => providerInfo()));
 
 ipcMain.handle('session:start', result(async (_event, input) => {
-  const owner = typeof input?.owner === 'string' ? input.owner : '';
-  const repo = typeof input?.repo === 'string' ? input.repo : '';
-  const sha = typeof input?.sha === 'string' ? input.sha : '';
-  if (!validRepo(owner, repo)) throw new Error('Некорректное имя репозитория');
-  if (!isValidGitSha(sha)) throw new Error('Некорректный SHA коммита');
-  const file = commitSessions.validateLaunchFile(input?.launchFile);
+  const options = commitSessions.normalizeSessionInput(input);
+  const { owner, repo, sha } = options;
   if (sessionStarting || (await liveSessions()).length > 0) {
     throw new Error('Остановите текущую сессию перед запуском новой (одна песочница за раз)');
   }
@@ -1811,7 +1853,7 @@ ipcMain.handle('session:start', result(async (_event, input) => {
     } catch {
       throw new Error('Песочница недоступна: включите Windows Sandbox и перезагрузитесь');
     }
-    const session = commitSessions.newSession({ owner, repo, sha, launchFile: file });
+    const session = commitSessions.newSession({ owner, repo, sha, launchFile: options.launchFile });
     const dir = commitSessions.sessionDir(sessionsRootDir(), session.id);
     await fs.mkdir(dir, { recursive: true });
     try {
@@ -1819,9 +1861,23 @@ ipcMain.handle('session:start', result(async (_event, input) => {
       const response = await fetch(url, { headers, signal: AbortSignal.timeout(ARCHIVE_FETCH_TIMEOUT_MS) });
       if (!response.ok) throw new Error(`Не удалось скачать архив коммита (status ${response.status})`);
       await streamResponseToFile(response, path.join(dir, 'repo.zip'), 'Архив превышает лимит 512 МБ');
-      await fs.writeFile(path.join(dir, 'provision.cmd'), commitSessions.buildProvisionScript({ launchFile: file }), { encoding: 'utf8' });
+      await fs.writeFile(path.join(dir, 'provision.cmd'), commitSessions.buildProvisionScript({ launchFile: options.launchFile }), { encoding: 'utf8' });
+      let logonCommand = 'cmd.exe /c C:\\gitora\\provision.cmd';
+      const extraFolders = [];
+      const sdkDir = await ensureHostSdk();
+      if (sdkDir) {
+        await fs.writeFile(path.join(dir, 'wrapper.cmd'), commitSessions.buildSdkWrapper(), { encoding: 'utf8' });
+        extraFolders.push({ hostFolder: sdkDir, sandboxFolder: 'C:\\sdkcache', readOnly: true });
+        logonCommand = 'cmd.exe /c C:\\gitora\\wrapper.cmd';
+      }
       const wsbPath = path.join(dir, 'session.wsb');
-      await fs.writeFile(wsbPath, commitSessions.buildWsb({ hostFolder: dir, logonCommand: 'cmd.exe /c C:\\gitora\\provision.cmd' }), { encoding: 'utf8' });
+      await fs.writeFile(wsbPath, commitSessions.buildWsb({
+        hostFolder: dir,
+        logonCommand,
+        memoryMb: options.memoryMb,
+        networking: options.networking,
+        extraFolders,
+      }), { encoding: 'utf8' });
       let child = null;
       try {
         child = spawn(SANDBOX_EXE, [wsbPath], { detached: true, stdio: 'ignore' });
@@ -1836,7 +1892,14 @@ ipcMain.handle('session:start', result(async (_event, input) => {
       if (!child || !Number.isInteger(child.pid)) {
         throw new Error('Песочница недоступна: проверьте, что Windows Sandbox включён');
       }
-      const entry = { ...session, state: 'running', pid: child.pid, dir, wsbPath };
+      const entry = {
+        ...session,
+        state: 'running',
+        pid: child.pid,
+        dir,
+        wsbPath,
+        expiresAt: Date.now() + options.maxAgeMinutes * 60 * 1000,
+      };
       child.once('exit', () => {
         const live = commitSessionRegistry.get(entry.id);
         if (live) {
@@ -1885,6 +1948,19 @@ ipcMain.handle('session:stop', result(async (_event, id) => {
 }));
 
 ipcMain.handle('session:list', result(async () => (await liveSessions()).map(publicSession)));
+
+ipcMain.handle('session:log', result(async (_event, id) => {
+  const sessionId = typeof id === 'string' ? id : id?.id;
+  const entry = commitSessionRegistry.get(sessionId);
+  if (!entry) throw new Error('Сессия не найдена');
+  let log = '';
+  try {
+    log = await fs.readFile(path.join(entry.dir, 'session.log'), 'utf8');
+  } catch {
+    log = '';
+  }
+  return { id: entry.id, state: entry.state, log: commitSessions.tailText(log) };
+}));
 
 ipcMain.handle('github:repos', result(async () => (
   githubRequestAll('/user/repos?per_page=100&sort=updated')

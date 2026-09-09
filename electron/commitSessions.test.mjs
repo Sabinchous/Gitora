@@ -4,11 +4,16 @@ import { describe, expect, it } from 'vitest';
 const require = createRequire(import.meta.url);
 const {
   buildProvisionScript,
+  buildSdkWrapper,
   buildWsb,
   detectLaunchFile,
+  hasDotnet10,
   isAlive,
   newSession,
+  normalizeSessionInput,
+  sdkCacheDir,
   sessionDir,
+  tailText,
   validateLaunchFile,
 } = require('./commitSessions.cjs');
 
@@ -74,5 +79,41 @@ describe('session model', () => {
     expect(() => sessionDir('C:\\t', '../evil')).toThrow();
     expect(isAlive(process.pid)).toBe(true);
     expect(isAlive(99999999)).toBe(false);
+  });
+});
+
+describe('session input normalization (phase 2)', () => {
+  const good = { owner: 'acme', repo: 'demo', sha: 'a'.repeat(40), launchFile: 'src/App.csproj' };
+
+  it('applies defaults and accepts explicit options', () => {
+    expect(normalizeSessionInput(good)).toMatchObject({
+      owner: 'acme', launchFile: 'src/App.csproj', memoryMb: 4096, networking: true, maxAgeMinutes: 240,
+    });
+    expect(normalizeSessionInput({ ...good, memoryMb: 8192, networking: false, maxAgeMinutes: 60 }))
+      .toMatchObject({ memoryMb: 8192, networking: false, maxAgeMinutes: 60 });
+  });
+
+  it('rejects bad owners, repos, shas and options', () => {
+    expect(() => normalizeSessionInput({ ...good, owner: '..' })).toThrow();
+    expect(() => normalizeSessionInput({ ...good, repo: '' })).toThrow();
+    expect(() => normalizeSessionInput({ ...good, sha: 'abc1234' })).toThrow();
+    expect(() => normalizeSessionInput({ ...good, memoryMb: 512 })).toThrow();
+    expect(() => normalizeSessionInput({ ...good, maxAgeMinutes: 2000 })).toThrow();
+  });
+
+  it('maps an sdk cache, detects dotnet 10 and tails logs', () => {
+    expect(sdkCacheDir('C:\\u')).toBe('C:\\u\\gitora-sdkcache');
+    expect(hasDotnet10('10.0.400 [C:\\Program Files\\dotnet\\sdk]\n9.0.100 [x]')).toBe(true);
+    expect(hasDotnet10('9.0.100 [x]')).toBe(false);
+    expect(tailText('abcdef', 4)).toContain('ef');
+    expect(buildSdkWrapper()).toContain('C:\\sdkcache');
+    const wsb = buildWsb({
+      hostFolder: 'C:\\s', logonCommand: 'x', networking: false,
+      extraFolders: [{ hostFolder: 'C:\\sdk', sandboxFolder: 'C:\\sdkcache' }],
+    });
+    expect(wsb).toContain('<Networking>Disable</Networking>');
+    expect(wsb).toContain('<SandboxFolder>C:\\sdkcache</SandboxFolder>');
+    expect(wsb).toContain('<ReadOnly>true</ReadOnly>');
+    expect(() => buildWsb({ hostFolder: 'C:\\s', logonCommand: 'x', extraFolders: [{ hostFolder: 'rel' }] })).toThrow();
   });
 });
