@@ -1,6 +1,8 @@
 ﻿const { app, BrowserWindow, ipcMain, safeStorage, shell, dialog } = require('electron');
 const { clipboard } = require('electron');
 const fs = require('fs/promises');
+const nodeFs = require('fs');
+const { once } = require('events');
 const path = require('path');
 const crypto = require('crypto');
 const { execFile, spawn } = require('child_process');
@@ -541,6 +543,60 @@ function snapshotWithUser(user) {
 // temp dir on stop/liveness refresh. Tokens never enter the VM: only the
 // downloaded commit archive is mapped in.
 const commitSessionRegistry = new Map();
+// Sync gate: closes the TOCTOU window between the single-sandbox check and
+// registration (two concurrent session:start calls).
+let sessionStarting = false;
+const SANDBOX_EXE = 'C:\\Windows\\System32\\WindowsSandbox.exe';
+const MAX_ARCHIVE_BYTES = 512 * 1024 * 1024;
+const MAX_SESSION_DIR_BYTES = 2 * 1024 * 1024 * 1024;
+const ARCHIVE_FETCH_TIMEOUT_MS = 5 * 60 * 1000;
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Bounded download: Content-Length pre-check + streaming byte counter +
+// timeout. Never buffers the whole archive in memory (OOM guard).
+async function streamResponseToFile(response, dest, limitMessage) {
+  const announced = Number(response.headers.get('content-length'));
+  if (Number.isFinite(announced) && announced > MAX_ARCHIVE_BYTES) throw new Error(limitMessage);
+  const writer = nodeFs.createWriteStream(dest);
+  let bytes = 0;
+  try {
+    for await (const chunk of response.body) {
+      bytes += chunk.length;
+      if (bytes > MAX_ARCHIVE_BYTES) throw new Error(limitMessage);
+      if (!writer.write(chunk)) await once(writer, 'drain');
+    }
+    writer.end();
+    await once(writer, 'finish');
+  } catch (error) {
+    try { writer.destroy(); } catch {}
+    await fs.rm(dest, { force: true });
+    throw error;
+  }
+  return bytes;
+}
+
+async function sessionDirSizeBytes(dir) {
+  let total = 0;
+  async function walk(current) {
+    let entries;
+    try {
+      entries = await fs.readdir(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) await walk(full);
+      else {
+        try {
+          total += (await fs.stat(full)).size;
+        } catch {}
+      }
+    }
+  }
+  await walk(dir);
+  return total;
+}
 
 function sessionsRootDir() {
   return commitSessions.sessionsRoot(app.getPath('temp'));
@@ -564,18 +620,37 @@ async function removeSessionDir(dir) {
   } catch {}
 }
 
-function refreshSessionLiveness(entry) {
-  if ((entry.state === 'running' || entry.state === 'starting') && !commitSessions.isAlive(entry.pid)) {
+async function killSessionVm(entry) {
+  try {
+    if (commitSessions.isAlive(entry.pid)) {
+      await execFileAsync('taskkill.exe', ['/PID', String(entry.pid), '/T', '/F'], { windowsHide: true });
+    }
+  } catch {}
+}
+
+async function refreshSessionLiveness(entry) {
+  if (entry.state !== 'running' && entry.state !== 'starting') return true;
+  if (!commitSessions.isAlive(entry.pid)) {
     entry.state = 'gone';
     void removeSessionDir(entry.dir);
     commitSessionRegistry.delete(entry.id);
     return false;
   }
+  // Disk-quota guard: build logs/unpacks live on the host-mapped dir.
+  try {
+    if (await sessionDirSizeBytes(entry.dir) > MAX_SESSION_DIR_BYTES) {
+      entry.state = 'stopping';
+      await killSessionVm(entry);
+      await removeSessionDir(entry.dir);
+      commitSessionRegistry.delete(entry.id);
+      return false;
+    }
+  } catch {}
   return true;
 }
 
-function liveSessions() {
-  for (const entry of [...commitSessionRegistry.values()]) refreshSessionLiveness(entry);
+async function liveSessions() {
+  for (const entry of [...commitSessionRegistry.values()]) await refreshSessionLiveness(entry);
   return [...commitSessionRegistry.values()];
 }
 
@@ -756,7 +831,8 @@ function shouldFetchAllPages(endpoint) {
 }
 
 function validRepo(owner, repo) {
-  return REPO_PART.test(owner) && REPO_PART.test(repo);
+  return REPO_PART.test(owner) && REPO_PART.test(repo)
+    && owner !== '.' && owner !== '..' && repo !== '.' && repo !== '..';
 }
 
 function teamRepositoryEndpoint(owner, repo, suffix = '') {
@@ -1562,6 +1638,14 @@ if (!isMcpServer && !hasSingleInstanceLock) {
   app.whenReady().then(async () => {
     mcpLog('gitora_start', { pid: process.pid, version: app.getVersion() });
     await restoreToken();
+    // Orphaned session dirs (crash/restart leave UUID folders behind; live
+    // VMs are untracked after restart anyway) — best-effort sweep.
+    void (async () => {
+      try {
+        await fs.rm(sessionsRootDir(), { recursive: true, force: true });
+        await fs.mkdir(sessionsRootDir(), { recursive: true });
+      } catch {}
+    })();
     createWindow();
     // MCP не должен блокировать создание окна и загрузку Gitora.
     void startMcpBridge();
@@ -1717,28 +1801,63 @@ ipcMain.handle('session:start', result(async (_event, input) => {
   if (!validRepo(owner, repo)) throw new Error('Некорректное имя репозитория');
   if (!isValidGitSha(sha)) throw new Error('Некорректный SHA коммита');
   const file = commitSessions.validateLaunchFile(input?.launchFile);
-  if (liveSessions().length > 0) {
+  if (sessionStarting || (await liveSessions()).length > 0) {
     throw new Error('Остановите текущую сессию перед запуском новой (одна песочница за раз)');
   }
-  const session = commitSessions.newSession({ owner, repo, sha, launchFile: file });
-  const dir = commitSessions.sessionDir(sessionsRootDir(), session.id);
-  await fs.mkdir(dir, { recursive: true });
+  sessionStarting = true;
   try {
-    const { url, headers } = commitArchiveRequest(owner, repo, sha);
-    const response = await fetch(url, { headers });
-    if (!response.ok) throw new Error(`Не удалось скачать архив коммита (status ${response.status})`);
-    await fs.writeFile(path.join(dir, 'repo.zip'), Buffer.from(await response.arrayBuffer()));
-    await fs.writeFile(path.join(dir, 'provision.cmd'), commitSessions.buildProvisionScript({ launchFile: file }), { encoding: 'utf8' });
-    const wsbPath = path.join(dir, 'session.wsb');
-    await fs.writeFile(wsbPath, commitSessions.buildWsb({ hostFolder: dir, logonCommand: 'cmd.exe /c C:\\gitora\\provision.cmd' }), { encoding: 'utf8' });
-    const child = spawn('C:\\Windows\\System32\\WindowsSandbox.exe', [wsbPath], { detached: true, stdio: 'ignore' });
-    child.unref();
-    const entry = { ...session, state: 'running', pid: child.pid, dir, wsbPath };
-    commitSessionRegistry.set(entry.id, entry);
-    return publicSession(entry);
-  } catch (error) {
-    await removeSessionDir(dir);
-    throw error;
+    try {
+      await fs.access(SANDBOX_EXE);
+    } catch {
+      throw new Error('Песочница недоступна: включите Windows Sandbox и перезагрузитесь');
+    }
+    const session = commitSessions.newSession({ owner, repo, sha, launchFile: file });
+    const dir = commitSessions.sessionDir(sessionsRootDir(), session.id);
+    await fs.mkdir(dir, { recursive: true });
+    try {
+      const { url, headers } = commitArchiveRequest(owner, repo, sha);
+      const response = await fetch(url, { headers, signal: AbortSignal.timeout(ARCHIVE_FETCH_TIMEOUT_MS) });
+      if (!response.ok) throw new Error(`Не удалось скачать архив коммита (status ${response.status})`);
+      await streamResponseToFile(response, path.join(dir, 'repo.zip'), 'Архив превышает лимит 512 МБ');
+      await fs.writeFile(path.join(dir, 'provision.cmd'), commitSessions.buildProvisionScript({ launchFile: file }), { encoding: 'utf8' });
+      const wsbPath = path.join(dir, 'session.wsb');
+      await fs.writeFile(wsbPath, commitSessions.buildWsb({ hostFolder: dir, logonCommand: 'cmd.exe /c C:\\gitora\\provision.cmd' }), { encoding: 'utf8' });
+      let child = null;
+      try {
+        child = spawn(SANDBOX_EXE, [wsbPath], { detached: true, stdio: 'ignore' });
+        child.unref();
+        await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('spawn', resolve);
+        });
+      } catch {
+        throw new Error('Песочница недоступна: проверьте, что Windows Sandbox включён');
+      }
+      if (!child || !Number.isInteger(child.pid)) {
+        throw new Error('Песочница недоступна: проверьте, что Windows Sandbox включён');
+      }
+      const entry = { ...session, state: 'running', pid: child.pid, dir, wsbPath };
+      child.once('exit', () => {
+        const live = commitSessionRegistry.get(entry.id);
+        if (live) {
+          live.state = 'gone';
+          void removeSessionDir(live.dir);
+          commitSessionRegistry.delete(live.id);
+        }
+      });
+      commitSessionRegistry.set(entry.id, entry);
+      return publicSession(entry);
+    } catch (error) {
+      await removeSessionDir(dir);
+      // Never leak host paths (temp layout, username) to the renderer.
+      if (error && ['ENOENT', 'ENOSPC', 'EACCES', 'EPERM'].includes(error.code)) {
+        console.error('[sessions] prepare failed:', error.message);
+        throw new Error('Не удалось подготовить сессию');
+      }
+      throw error;
+    }
+  } finally {
+    sessionStarting = false;
   }
 }));
 
@@ -1747,17 +1866,25 @@ ipcMain.handle('session:stop', result(async (_event, id) => {
   const entry = commitSessionRegistry.get(sessionId);
   if (!entry) throw new Error('Сессия не найдена');
   entry.state = 'stopping';
-  try {
-    if (commitSessions.isAlive(entry.pid)) {
-      await execFileAsync('taskkill.exe', ['/PID', String(entry.pid), '/T', '/F'], { windowsHide: true });
-    }
-  } catch {}
+  await killSessionVm(entry);
+  // Confirm death BEFORE unmapping the dir: removing the mapped folder from
+  // under a live VM strands it without a way back.
+  const deadline = Date.now() + 10000;
+  let dead = !commitSessions.isAlive(entry.pid);
+  while (!dead && Date.now() < deadline) {
+    await sleep(500);
+    dead = !commitSessions.isAlive(entry.pid);
+  }
+  if (!dead) {
+    entry.state = 'running';
+    throw new Error('Не удалось остановить VM: закройте окно песочницы вручную');
+  }
   await removeSessionDir(entry.dir);
   commitSessionRegistry.delete(entry.id);
   return { id: entry.id, state: 'gone' };
 }));
 
-ipcMain.handle('session:list', result(async () => liveSessions().map(publicSession)));
+ipcMain.handle('session:list', result(async () => (await liveSessions()).map(publicSession)));
 
 ipcMain.handle('github:repos', result(async () => (
   githubRequestAll('/user/repos?per_page=100&sort=updated')
@@ -2866,8 +2993,7 @@ ipcMain.handle('app:download-release', result(async (_event, { url, fileName, op
   const filePath = await resolveDownloadPath(fileName, options);
   if (!filePath) return null;
 
-  const buffer = Buffer.from(await response.arrayBuffer());
-  await fs.writeFile(filePath, buffer);
+  await streamResponseToFile(response, filePath, 'Файл превышает лимит 512 МБ');
 
   return filePath;
 }));
@@ -2877,7 +3003,7 @@ ipcMain.handle('app:download-archive', result(async (_event, { owner, repo, sha,
   if (!isValidGitSha(sha)) throw new Error('Некорректный SHA коммита');
 
   const { url, headers } = commitArchiveRequest(owner, repo, sha);
-  const response = await fetch(url, { headers });
+  const response = await fetch(url, { headers, signal: AbortSignal.timeout(ARCHIVE_FETCH_TIMEOUT_MS) });
 
   if (!response.ok) throw new Error('РќРµ СѓРґР°Р»РѕСЃСЊ СЃРєР°С‡Р°С‚СЊ Р°СЂС…РёРІ');
 
@@ -2885,8 +3011,7 @@ ipcMain.handle('app:download-archive', result(async (_event, { owner, repo, sha,
   const filePath = await resolveDownloadPath(fileName, options);
   if (!filePath) return null;
 
-  const buffer = Buffer.from(await response.arrayBuffer());
-  await fs.writeFile(filePath, buffer);
+  await streamResponseToFile(response, filePath, 'Архив превышает лимит 512 МБ');
 
   return filePath;
 }));

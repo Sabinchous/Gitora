@@ -43,12 +43,25 @@ describe('provision script generation', () => {
   it('runs runnable projects and only builds solutions', () => {
     const run = buildProvisionScript({ launchFile: 'src/App/App.csproj' });
     expect(run).toContain('dotnet run --project');
-    expect(run).toContain('App.csproj'.replace('/', '\\'));
+    expect(run).toContain('"%SRCDIR%\\src\\App\\App.csproj"');
     expect(run).toContain('dotnet-install.ps1');
     expect(run).toContain('Expand-Archive');
     const buildOnly = buildProvisionScript({ launchFile: 'App.slnx' });
     expect(buildOnly).toContain('dotnet build');
     expect(buildOnly).not.toContain('dotnet run');
+    expect(buildOnly).not.toContain('-o "C:\\gitora\\out"');
+  });
+
+  it('avoids set-in-parens, guards the archive layout and validates options', () => {
+    const run = buildProvisionScript({ launchFile: 'src/App/App.csproj' });
+    expect(run).toContain('if not errorlevel 1 goto :have_dotnet');
+    expect(run).toContain(':have_dotnet');
+    expect(run).toContain('if ($d.Count -ne 1)');
+    expect(run).toContain('if not defined SRCDIR exit /b 1');
+    expect(() => buildProvisionScript({ launchFile: 'a.csproj', dotnetChannel: '10; evil' })).toThrow();
+    expect(() => buildWsb({ hostFolder: 'C:\\t', logonCommand: 'x', memoryMb: 512 })).toThrow();
+    expect(() => buildWsb({ hostFolder: 'C:\\t', logonCommand: 'x', memoryMb: 'lots' })).toThrow();
+    expect(buildWsb({ hostFolder: 'C:\\t', logonCommand: 'x', memoryMb: 8192 })).toContain('<MemoryInMB>8192</MemoryInMB>');
   });
 });
 

@@ -60,8 +60,12 @@ function escapeXml(value) {
 function buildWsb({ hostFolder, sandboxFolder = 'C:\\gitora', logonCommand, memoryMb = 4096 }) {
   if (!hostFolder || !path.isAbsolute(hostFolder)) throw new Error('Некорректная папка сессии');
   if (!logonCommand) throw new Error('Пустая команда запуска VM');
+  const memory = memoryMb === undefined ? 4096 : Number(memoryMb);
+  if (!Number.isInteger(memory) || memory < 1024 || memory > 32768) {
+    throw new Error('Некорректный лимит памяти VM (1024–32768 МБ)');
+  }
   return `<Configuration>\r\n`
-    + `  <MemoryInMB>${memoryMb}</MemoryInMB>\r\n`
+    + `  <MemoryInMB>${memory}</MemoryInMB>\r\n`
     + `  <MappedFolders>\r\n`
     + `    <MappedFolder>\r\n`
     + `      <HostFolder>${escapeXml(hostFolder)}</HostFolder>\r\n`
@@ -80,24 +84,33 @@ function buildWsb({ hostFolder, sandboxFolder = 'C:\\gitora', logonCommand, memo
 // Solutions (.sln/.slnx) are build-only; runnable projects are built AND run.
 function buildProvisionScript({ launchFile, dotnetChannel = '10.0' }) {
   const file = validateLaunchFile(launchFile);
+  if (!/^[0-9]+\.[0-9]+$/.test(String(dotnetChannel || ''))) throw new Error('Некорректный канал .NET SDK');
   const run = isRunnableLaunchFile(file);
+  const winFile = file.replace(/\//g, '\\');
+  // NOTE: no `set` inside (...) blocks: %PATH% on real machines contains
+  // parentheses (e.g. `Program Files (x86)`) which would break block parsing.
   return '@echo off\r\n'
     + 'echo [%TIME%] logon start >> C:\\gitora\\session.log\r\n'
     + 'where dotnet >> C:\\gitora\\session.log 2>&1\r\n'
-    + 'if %ERRORLEVEL% NEQ 0 (\r\n'
-    + '  echo [%TIME%] installing SDK >> C:\\gitora\\session.log\r\n'
-    + `  powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest https://dot.net/v1/dotnet-install.ps1 -OutFile C:\\gitora\\dotnet-install.ps1" >> C:\\gitora\\session.log 2>&1\r\n`
-    + `  powershell -NoProfile -ExecutionPolicy Bypass -File C:\\gitora\\dotnet-install.ps1 -Channel ${dotnetChannel} -InstallDir C:\\gitora\\dotnet >> C:\\gitora\\session.log 2>&1\r\n`
-    + '  set PATH=%PATH%;C:\\gitora\\dotnet\r\n'
-    + ')\r\n'
+    + 'if not errorlevel 1 goto :have_dotnet\r\n'
+    + 'echo [%TIME%] installing SDK >> C:\\gitora\\session.log\r\n'
+    + `powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest https://dot.net/v1/dotnet-install.ps1 -OutFile C:\\gitora\\dotnet-install.ps1" >> C:\\gitora\\session.log 2>&1\r\n`
+    + `powershell -NoProfile -ExecutionPolicy Bypass -File C:\\gitora\\dotnet-install.ps1 -Channel ${dotnetChannel} -InstallDir C:\\gitora\\dotnet >> C:\\gitora\\session.log 2>&1\r\n`
+    + 'set "PATH=%PATH%;C:\\gitora\\dotnet"\r\n'
+    + ':have_dotnet\r\n'
     + 'dotnet --version >> C:\\gitora\\session.log 2>&1\r\n'
     + `powershell -NoProfile -Command "Expand-Archive -LiteralPath 'C:\\gitora\\repo.zip' -DestinationPath 'C:\\gitora\\work' -Force" >> C:\\gitora\\session.log 2>&1\r\n`
-    + `powershell -NoProfile -Command "(Get-ChildItem 'C:\\gitora\\work' -Directory | Select-Object -First 1).FullName | Out-File 'C:\\gitora\\srcdir.txt' -Encoding ascii" >> C:\\gitora\\session.log 2>&1\r\n`
+    + `powershell -NoProfile -Command "$d=@(Get-ChildItem 'C:\\gitora\\work' -Directory); if ($d.Count -ne 1) { exit 1 }; $d[0].FullName | Out-File 'C:\\gitora\\srcdir.txt' -Encoding ascii" >> C:\\gitora\\session.log 2>&1\r\n`
+    + 'if %ERRORLEVEL% NEQ 0 (\r\n'
+    + '  echo [%TIME%] bad archive layout, expected one top folder >> C:\\gitora\\session.log\r\n'
+    + '  exit /b 1\r\n'
+    + ')\r\n'
     + 'for /f "delims=" %%D in (C:\\gitora\\srcdir.txt) do set SRCDIR=%%D\r\n'
-    + `echo [%TIME%] build start ${file} >> C:\\gitora\\session.log\r\n`
+    + 'if not defined SRCDIR exit /b 1\r\n'
+    + `echo "[%TIME%] build start ${file}" >> C:\\gitora\\session.log\r\n`
     + (run
-      ? `dotnet run --project "%SRCDIR%\\${file.replace(/\//g, '\\')}" -c Release >> C:\\gitora\\session.log 2>&1\r\n`
-      : `dotnet build "%SRCDIR%\\${file.replace(/\//g, '\\')}" -c Release -o "C:\\gitora\\out" >> C:\\gitora\\session.log 2>&1\r\n`)
+      ? `dotnet run --project "%SRCDIR%\\${winFile}" -c Release >> C:\\gitora\\session.log 2>&1\r\n`
+      : `dotnet build "%SRCDIR%\\${winFile}" -c Release >> C:\\gitora\\session.log 2>&1\r\n`)
     + 'echo [%TIME%] exit %ERRORLEVEL% >> C:\\gitora\\session.log\r\n';
 }
 
