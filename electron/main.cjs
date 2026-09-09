@@ -3,7 +3,7 @@ const { clipboard } = require('electron');
 const fs = require('fs/promises');
 const path = require('path');
 const crypto = require('crypto');
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
 const { promisify } = require('util');
 const ignore = require('ignore');
 const {
@@ -49,6 +49,7 @@ const {
   normalizeGiteaBaseUrl,
 } = require('./gitea.cjs');
 const accountsStore = require('./gitAccounts.cjs');
+const commitSessions = require('./commitSessions.cjs');
 
 const isDev = process.argv.includes('--dev');
 const isMcpServer = process.argv.includes('--mcp-server');
@@ -533,6 +534,59 @@ async function removeAccountById(id) {
 
 function snapshotWithUser(user) {
   return { ...user, ...providerInfo(), ...accountsStore.snapshot(gitSession) };
+}
+
+// --- Commit sessions (Phase 1) --------------------------------------------
+// In-memory registry; closing the sandbox wipes the VM, the host removes the
+// temp dir on stop/liveness refresh. Tokens never enter the VM: only the
+// downloaded commit archive is mapped in.
+const commitSessionRegistry = new Map();
+
+function sessionsRootDir() {
+  return commitSessions.sessionsRoot(app.getPath('temp'));
+}
+
+function publicSession(entry) {
+  return {
+    id: entry.id,
+    owner: entry.owner,
+    repo: entry.repo,
+    sha: entry.sha,
+    launchFile: entry.launchFile,
+    state: entry.state,
+    createdAt: entry.createdAt,
+  };
+}
+
+async function removeSessionDir(dir) {
+  try {
+    await fs.rm(dir, { recursive: true, force: true });
+  } catch {}
+}
+
+function refreshSessionLiveness(entry) {
+  if ((entry.state === 'running' || entry.state === 'starting') && !commitSessions.isAlive(entry.pid)) {
+    entry.state = 'gone';
+    void removeSessionDir(entry.dir);
+    commitSessionRegistry.delete(entry.id);
+    return false;
+  }
+  return true;
+}
+
+function liveSessions() {
+  for (const entry of [...commitSessionRegistry.values()]) refreshSessionLiveness(entry);
+  return [...commitSessionRegistry.values()];
+}
+
+function commitArchiveRequest(owner, repo, sha) {
+  const url = gitProvider === 'gitea'
+    ? `${giteaBaseUrl}/${owner}/${repo}/archive/${sha}.zip`
+    : `${GITHUB_ORIGIN}/${owner}/${repo}/archive/${sha}.zip`;
+  const headers = githubToken
+    ? (gitProvider === 'gitea' ? giteaHeaders(githubToken) : { Authorization: `Bearer ${githubToken}` })
+    : {};
+  return { url, headers };
 }
 
 function githubHeaders(token = githubToken) {
@@ -1656,6 +1710,55 @@ ipcMain.handle('github:remove-account', result(async (_event, id) => {
 
 ipcMain.handle('provider:get', result(async () => providerInfo()));
 
+ipcMain.handle('session:start', result(async (_event, input) => {
+  const owner = typeof input?.owner === 'string' ? input.owner : '';
+  const repo = typeof input?.repo === 'string' ? input.repo : '';
+  const sha = typeof input?.sha === 'string' ? input.sha : '';
+  if (!validRepo(owner, repo)) throw new Error('Некорректное имя репозитория');
+  if (!isValidGitSha(sha)) throw new Error('Некорректный SHA коммита');
+  const file = commitSessions.validateLaunchFile(input?.launchFile);
+  if (liveSessions().length > 0) {
+    throw new Error('Остановите текущую сессию перед запуском новой (одна песочница за раз)');
+  }
+  const session = commitSessions.newSession({ owner, repo, sha, launchFile: file });
+  const dir = commitSessions.sessionDir(sessionsRootDir(), session.id);
+  await fs.mkdir(dir, { recursive: true });
+  try {
+    const { url, headers } = commitArchiveRequest(owner, repo, sha);
+    const response = await fetch(url, { headers });
+    if (!response.ok) throw new Error(`Не удалось скачать архив коммита (status ${response.status})`);
+    await fs.writeFile(path.join(dir, 'repo.zip'), Buffer.from(await response.arrayBuffer()));
+    await fs.writeFile(path.join(dir, 'provision.cmd'), commitSessions.buildProvisionScript({ launchFile: file }), { encoding: 'utf8' });
+    const wsbPath = path.join(dir, 'session.wsb');
+    await fs.writeFile(wsbPath, commitSessions.buildWsb({ hostFolder: dir, logonCommand: 'cmd.exe /c C:\\gitora\\provision.cmd' }), { encoding: 'utf8' });
+    const child = spawn('C:\\Windows\\System32\\WindowsSandbox.exe', [wsbPath], { detached: true, stdio: 'ignore' });
+    child.unref();
+    const entry = { ...session, state: 'running', pid: child.pid, dir, wsbPath };
+    commitSessionRegistry.set(entry.id, entry);
+    return publicSession(entry);
+  } catch (error) {
+    await removeSessionDir(dir);
+    throw error;
+  }
+}));
+
+ipcMain.handle('session:stop', result(async (_event, id) => {
+  const sessionId = typeof id === 'string' ? id : id?.id;
+  const entry = commitSessionRegistry.get(sessionId);
+  if (!entry) throw new Error('Сессия не найдена');
+  entry.state = 'stopping';
+  try {
+    if (commitSessions.isAlive(entry.pid)) {
+      await execFileAsync('taskkill.exe', ['/PID', String(entry.pid), '/T', '/F'], { windowsHide: true });
+    }
+  } catch {}
+  await removeSessionDir(entry.dir);
+  commitSessionRegistry.delete(entry.id);
+  return { id: entry.id, state: 'gone' };
+}));
+
+ipcMain.handle('session:list', result(async () => liveSessions().map(publicSession)));
+
 ipcMain.handle('github:repos', result(async () => (
   githubRequestAll('/user/repos?per_page=100&sort=updated')
 )));
@@ -2773,14 +2876,8 @@ ipcMain.handle('app:download-archive', result(async (_event, { owner, repo, sha,
   if (!validRepo(owner, repo)) throw new Error('РќРµРєРѕСЂСЂРµРєС‚РЅРѕРµ РёРјСЏ СЂРµРїРѕР·РёС‚РѕСЂРёСЏ');
   if (!isValidGitSha(sha)) throw new Error('Некорректный SHA коммита');
 
-  const url = gitProvider === 'gitea'
-    ? `${giteaBaseUrl}/${owner}/${repo}/archive/${sha}.zip`
-    : `${GITHUB_ORIGIN}/${owner}/${repo}/archive/${sha}.zip`;
-  const response = await fetch(url, {
-    headers: githubToken
-      ? (gitProvider === 'gitea' ? giteaHeaders(githubToken) : { Authorization: `Bearer ${githubToken}` })
-      : {},
-  });
+  const { url, headers } = commitArchiveRequest(owner, repo, sha);
+  const response = await fetch(url, { headers });
 
   if (!response.ok) throw new Error('РќРµ СѓРґР°Р»РѕСЃСЊ СЃРєР°С‡Р°С‚СЊ Р°СЂС…РёРІ');
 

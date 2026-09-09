@@ -103,6 +103,25 @@ export interface AccountsSnapshot {
 
 export type SessionUser = AuthenticatedUser & Partial<AccountsSnapshot>;
 
+export type CommitSessionState = 'starting' | 'running' | 'stopping' | 'gone';
+
+export interface CommitSession {
+  id: string;
+  owner: string;
+  repo: string;
+  sha: string;
+  launchFile: string;
+  state: CommitSessionState;
+  createdAt: string;
+}
+
+export interface SessionStartInput {
+  owner: string;
+  repo: string;
+  sha: string;
+  launchFile: string;
+}
+
 export type GitHubCollaboratorPermission = 'pull' | 'triage' | 'push' | 'maintain' | 'admin';
 export type GitHubTeamRole = 'Read' | 'Triage' | 'Write' | 'Maintain' | 'Admin';
 export type TeamLoadState = 'idle' | 'loading' | 'loaded' | 'empty' | 'forbidden' | 'error' | 'pending';
@@ -562,6 +581,9 @@ export interface ElectronAPI {
     getProvider: () => Promise<GitHubApiResult<GitProviderInfo>>;
     switchAccount: (id: string) => Promise<GitHubApiResult<SessionUser>>;
     removeAccount: (id: string) => Promise<GitHubApiResult<SessionUser | null>>;
+    startSession: (input: SessionStartInput) => Promise<GitHubApiResult<CommitSession>>;
+    stopSession: (id: string) => Promise<GitHubApiResult<{ id: string; state: CommitSessionState }>>;
+    listSessions: () => Promise<GitHubApiResult<CommitSession[]>>;
     restoreSession: () => Promise<GitHubApiResult<SessionUser | null>>;
     logout: () => Promise<GitHubApiResult<null>>;
     getRepos: () => Promise<GitHubApiResult<GitHubRepo[]>>;
