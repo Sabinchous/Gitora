@@ -28,6 +28,7 @@ export const SessionsPanel: React.FC = () => {
     project,
     sessions,
     sessionsLoading,
+    sessionsMutating,
     sessionsError,
     sessionLogById,
     sessionLogLoading,
@@ -40,12 +41,20 @@ export const SessionsPanel: React.FC = () => {
   useEffect(() => {
     void loadSessions();
     const timer = window.setInterval(() => {
-      void loadSessions();
+      void loadSessions(true);
     }, 5000);
     return () => {
       window.clearInterval(timer);
     };
   }, [loadSessions]);
+
+  useEffect(() => {
+    if (openLogId && !sessions.some(session => session.id === openLogId)) setOpenLogId(null);
+  }, [sessions, openLogId]);
+
+  useEffect(() => {
+    setOpenLogId(null);
+  }, [project?.repo]);
 
   const toggleLog = (id: string) => {
     if (openLogId === id) {
@@ -109,7 +118,7 @@ export const SessionsPanel: React.FC = () => {
                     {session.state !== 'gone' ? (
                       <button
                         type="button"
-                        disabled={sessionsLoading}
+                        disabled={sessionsMutating}
                         aria-label={`Остановить сессию ${session.sha.slice(0, 7)}`}
                         onClick={() => void stopSession(session.id)}
                         className="rounded-lg border border-[rgba(38,23,50,.12)] px-3 py-1.5 text-xs font-semibold hover:bg-[#F3EFE9] disabled:opacity-40"

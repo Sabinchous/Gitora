@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Play, X } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 
@@ -21,10 +21,13 @@ export const SessionStartModal: React.FC<{ onStarted?: () => void }> = ({ onStar
   const [maxAgeMinutes, setMaxAgeMinutes] = useState(240);
   const [networking, setNetworking] = useState(true);
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const targetKey = launchTarget ? `${launchTarget.owner}/${launchTarget.repo}@${launchTarget.sha}` : '';
 
   useEffect(() => {
+    if (busyRef.current) return;
     if (launchTarget) {
       setLaunchFile(readStoredLaunchFile(launchTarget.owner, launchTarget.repo));
       setMemoryMb(4096);
@@ -57,8 +60,10 @@ export const SessionStartModal: React.FC<{ onStarted?: () => void }> = ({ onStar
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!trimmedLaunchFile || busy) return;
+    if (!canStart || busyRef.current) return;
+    busyRef.current = true;
     setBusy(true);
+    setSubmitError(null);
     try {
       try {
         localStorage.setItem(launchFileStorageKey(launchTarget.owner, launchTarget.repo), trimmedLaunchFile);
@@ -78,7 +83,10 @@ export const SessionStartModal: React.FC<{ onStarted?: () => void }> = ({ onStar
         setLaunchTarget(null);
         onStarted?.();
       }
+    } catch (error) {
+      setSubmitError(error instanceof Error ? error.message : 'Не удалось запустить сессию');
     } finally {
+      busyRef.current = false;
       setBusy(false);
     }
   };
@@ -185,6 +193,11 @@ export const SessionStartModal: React.FC<{ onStarted?: () => void }> = ({ onStar
               Запустить
             </button>
           </div>
+          {submitError ? (
+            <p role="alert" className="mt-3 rounded-lg border border-[rgba(161,108,98,.28)] bg-[rgba(161,108,98,.09)] px-3 py-2 text-xs text-[#A16C62]">
+              {submitError}
+            </p>
+          ) : null}
         </form>
       </div>
     </div>

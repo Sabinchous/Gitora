@@ -107,6 +107,7 @@ interface AppState {
   teamStats: TeamResource<GitHubContributorStatistics>;
   sessions: CommitSession[];
   sessionsLoading: boolean;
+  sessionsMutating: boolean;
   sessionsError: string | null;
   sessionLogById: Record<string, SessionLog>;
   sessionLogLoading: boolean;
@@ -218,7 +219,7 @@ interface AppContextType extends AppState {
   restartMcp: () => Promise<AiConnectionStatus | null>;
   allowMcpWrites: (duration: McpWriteDuration) => Promise<McpWriteStatus | null>;
   revokeMcpWrites: () => Promise<McpWriteStatus | null>;
-  loadSessions: () => Promise<void>;
+  loadSessions: (quiet?: boolean) => Promise<void>;
   startSession: (input: SessionStartInput) => Promise<boolean>;
   stopSession: (id: string) => Promise<boolean>;
   loadSessionLog: (id: string) => Promise<void>;
@@ -468,6 +469,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [teamStats, setTeamStats] = useState<TeamResource<GitHubContributorStatistics>>(emptyTeamResource);
   const [sessions, setSessions] = useState<CommitSession[]>([]);
   const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [sessionsMutating, setSessionsMutating] = useState(false);
   const [sessionsError, setSessionsError] = useState<string | null>(null);
   const [sessionLogById, setSessionLogById] = useState<Record<string, SessionLog>>({});
   const [sessionLogLoading, setSessionLogLoading] = useState(false);
@@ -637,21 +639,27 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       : nextProjects[0] ?? null);
   };
 
-  const loadSessions = useCallback(async () => {
+  const sessionsReqId = useRef(0);
+  const sessionLogReqId = useRef<Record<string, number>>({});
+
+  const loadSessions = useCallback(async (quiet = false) => {
     if (!connected || !window.electronAPI) return;
-    setSessionsLoading(true);
+    const reqId = ++sessionsReqId.current;
+    if (!quiet) setSessionsLoading(true);
     setSessionsError(null);
     try {
       const result = await window.electronAPI.github.listSessions();
+      if (reqId !== sessionsReqId.current) return;
       if (result.success && result.data) {
         setSessions(result.data);
       } else {
         setSessionsError(result.error || 'Не удалось загрузить сессии');
       }
     } catch (error) {
+      if (reqId !== sessionsReqId.current) return;
       setSessionsError(error instanceof Error ? error.message : 'Не удалось загрузить сессии');
     } finally {
-      setSessionsLoading(false);
+      if (reqId === sessionsReqId.current && !quiet) setSessionsLoading(false);
     }
   }, [connected]);
 
@@ -660,7 +668,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       showError('Сессии доступны в приложении Gitora');
       return false;
     }
-    setSessionsLoading(true);
+    setSessionsMutating(true);
     setSessionsError(null);
     try {
       const result = await window.electronAPI.github.startSession(input);
@@ -679,7 +687,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       showError(message);
       return false;
     } finally {
-      setSessionsLoading(false);
+      setSessionsMutating(false);
     }
   };
 
@@ -688,7 +696,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       showError('Сессии доступны в приложении Gitora');
       return false;
     }
-    setSessionsLoading(true);
+    setSessionsMutating(true);
     setSessionsError(null);
     try {
       const result = await window.electronAPI.github.stopSession(id);
@@ -698,12 +706,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         showError(message);
         return false;
       }
-      setSessionLogById(prev => {
-        if (!(id in prev)) return prev;
-        const next = { ...prev };
-        delete next[id];
-        return next;
-      });
+      setSessionLogById(prev => Object.fromEntries(
+        Object.entries(prev).filter(([key]) => key !== id),
+      ) as Record<string, SessionLog>);
       await loadSessions();
       notify('Сессия остановлена');
       return true;
@@ -713,28 +718,33 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       showError(message);
       return false;
     } finally {
-      setSessionsLoading(false);
+      setSessionsMutating(false);
     }
   };
 
   const loadSessionLog = async (id: string): Promise<void> => {
     if (!id || !window.electronAPI) return;
+    const reqId = (sessionLogReqId.current[id] || 0) + 1;
+    sessionLogReqId.current[id] = reqId;
     setSessionLogLoading(true);
     try {
       const result = await window.electronAPI.github.getSessionLog(id);
-      if (result.success && result.data) {
-        setSessionLogById(prev => ({ ...prev, [id]: result.data as SessionLog }));
+      if (sessionLogReqId.current[id] !== reqId) return;
+      const logData = result.success ? result.data : undefined;
+      if (logData) {
+        setSessionLogById(prev => ({ ...prev, [id]: logData }));
       } else {
         const message = result.error || 'Не удалось загрузить лог сессии';
         setSessionsError(message);
         showError(message);
       }
     } catch (error) {
+      if (sessionLogReqId.current[id] !== reqId) return;
       const message = error instanceof Error ? error.message : 'Не удалось загрузить лог сессии';
       setSessionsError(message);
       showError(message);
     } finally {
-      setSessionLogLoading(false);
+      if (sessionLogReqId.current[id] === reqId) setSessionLogLoading(false);
     }
   };
 
@@ -783,6 +793,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setCommitStatsLoading(false);
     setSessions([]);
     setSessionsLoading(false);
+    setSessionsMutating(false);
     setSessionsError(null);
     setSessionLogById({});
     setSessionLogLoading(false);
@@ -1893,6 +1904,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       teamStats,
       sessions,
       sessionsLoading,
+      sessionsMutating,
       sessionsError,
       sessionLogById,
       sessionLogLoading,
