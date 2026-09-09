@@ -103,7 +103,7 @@ export const SessionsPanel: React.FC = () => {
                   <div className="mt-1 text-xs text-[#7D7482]">
                     <span className="font-mono">{session.sha.slice(0, 7)}</span>
                     <span className="mx-1">•</span>
-                    <span className="break-all">{session.launchFile}</span>
+                    <span className="break-all">{session.launchCommand || session.launchFile || ''}</span>
                   </div>
                   <div className="mt-1 text-xs text-[#7D7482]">
                     <span>{new Date(session.createdAt).toLocaleString('ru-RU')}</span>

@@ -539,6 +539,40 @@ function snapshotWithUser(user) {
   return { ...user, ...providerInfo(), ...accountsStore.snapshot(gitSession) };
 }
 
+// Lists zip entries on the host without extracting (no traversal risk:
+// names only, capped). PowerShell emits UTF-8 explicitly.
+async function listZipEntries(zipPath, maxEntries = 2000) {
+  const limit = Math.min(Math.max(Number(maxEntries) || 2000, 1), 5000);
+  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-Command',
+    '[Console]::OutputEncoding = [Text.UTF8Encoding]::new(); ' +
+    'Add-Type -AssemblyName System.IO.Compression.FileSystem; ' +
+    `$z = [IO.Compression.ZipFile]::OpenRead(${psQuote(zipPath)}); ` +
+    `$z.Entries.FullName | Select-Object -First ${limit}; $z.Dispose()`],
+  { windowsHide: true, encoding: 'utf8', timeout: 60000 });
+  return String(stdout || '').split('\n').map(line => line.trim()).filter(Boolean);
+}
+
+function isSafeZipEntry(name) {
+  const value = String(name || '').replace(/\\/g, '/');
+  return Boolean(value) && !value.startsWith('/') && !value.includes('..')
+    && /^[A-Za-z0-9._\-/ ]+$/.test(value);
+}
+
+// Reads one small text file from a zip (e.g. package.json for detection).
+async function readZipEntryText(zipPath, entryName, maxBytes = 102400) {
+  if (!isSafeZipEntry(entryName)) throw new Error('Некорректное имя файла в архиве');
+  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-Command',
+    '[Console]::OutputEncoding = [Text.UTF8Encoding]::new(); ' +
+    'Add-Type -AssemblyName System.IO.Compression.FileSystem; ' +
+    `$z = [IO.Compression.ZipFile]::OpenRead(${psQuote(zipPath)}); ` +
+    `$e = $z.Entries | Where-Object { $_.FullName -eq ${psQuote(entryName)} } | Select-Object -First 1; ` +
+    'if (-not $e) { exit 3 }; ' +
+    `$r = New-Object IO.StreamReader($e.Open()); $t = $r.ReadToEnd(); $r.Close(); $z.Dispose(); ` +
+    `if ($t.Length -gt ${maxBytes}) { $t.Substring(0, ${maxBytes}) } else { $t }`],
+  { windowsHide: true, encoding: 'utf8', timeout: 60000 });
+  return String(stdout || '');
+}
+
 // --- Commit sessions (Phase 1) --------------------------------------------
 // In-memory registry; closing the sandbox wipes the VM, the host removes the
 // temp dir on stop/liveness refresh. Tokens never enter the VM: only the
@@ -609,6 +643,7 @@ function publicSession(entry) {
     repo: entry.repo,
     sha: entry.sha,
     launchFile: entry.launchFile,
+    ...(entry.launchCommand ? { launchCommand: entry.launchCommand } : {}),
     state: entry.state,
     createdAt: entry.createdAt,
     ...(entry.expiresAt ? { expiresAt: new Date(entry.expiresAt).toISOString() } : {}),
@@ -1919,6 +1954,43 @@ ipcMain.handle('github:remove-account', result(async (_event, id) => {
 
 ipcMain.handle('provider:get', result(async () => providerInfo()));
 
+// Inspects a commit archive (names only, temp dir cleaned afterwards) and
+// reports how to build & run it: { kind: 'dotnet'|'node'|'unknown', ... }.
+ipcMain.handle('session:detect', result(async (_event, input) => {
+  const owner = typeof input?.owner === 'string' ? input.owner : '';
+  const repo = typeof input?.repo === 'string' ? input.repo : '';
+  const sha = typeof input?.sha === 'string' ? input.sha : '';
+  if (!validRepo(owner, repo)) throw new Error('Некорректное имя репозитория');
+  if (!isValidGitSha(sha)) throw new Error('Некорректный SHA коммита');
+  const tmpRoot = path.join(app.getPath('temp'), `gitora-detect-${crypto.randomUUID()}`);
+  await fs.mkdir(tmpRoot, { recursive: true });
+  try {
+    const { url, headers } = commitArchiveRequest(owner, repo, sha);
+    const response = await fetch(url, { headers, signal: AbortSignal.timeout(ARCHIVE_FETCH_TIMEOUT_MS) });
+    if (!response.ok) throw new Error(`Не удалось скачать архив коммита (status ${response.status})`);
+    const zipPath = path.join(tmpRoot, 'repo.zip');
+    await streamResponseToFile(response, zipPath, 'Архив превышает лимит 512 МБ');
+    const entries = await listZipEntries(zipPath);
+    const withTop = entries.filter(name => name.includes('/'));
+    const shallowestPkg = withTop
+      .map(name => name.replace(/\\/g, '/'))
+      .map(name => ({ raw: name, stripped: name.split('/').slice(1).join('/') }))
+      .filter(item => item.stripped === 'package.json' || item.stripped.endsWith('/package.json'))
+      .sort((a, b) => a.stripped.split('/').length - b.stripped.split('/').length)[0];
+    let packageJsonText = null;
+    if (shallowestPkg) {
+      try {
+        packageJsonText = await readZipEntryText(zipPath, shallowestPkg.raw);
+      } catch {
+        packageJsonText = null;
+      }
+    }
+    return commitSessions.detectRuntime(entries, packageJsonText);
+  } finally {
+    await fs.rm(tmpRoot, { recursive: true, force: true });
+  }
+}));
+
 ipcMain.handle('session:start', result(async (_event, input) => {
   const options = commitSessions.normalizeSessionInput(input);
   const { owner, repo, sha } = options;
@@ -1932,7 +2004,7 @@ ipcMain.handle('session:start', result(async (_event, input) => {
     } catch {
       throw new Error('Песочница недоступна: включите Windows Sandbox и перезагрузитесь');
     }
-    const session = commitSessions.newSession({ owner, repo, sha, launchFile: options.launchFile });
+    const session = commitSessions.newSession({ owner, repo, sha, launchFile: options.launchFile, launchCommand: options.launchCommand });
     const dir = commitSessions.sessionDir(sessionsRootDir(), session.id);
     await fs.mkdir(dir, { recursive: true });
     try {
@@ -1940,7 +2012,10 @@ ipcMain.handle('session:start', result(async (_event, input) => {
       const response = await fetch(url, { headers, signal: AbortSignal.timeout(ARCHIVE_FETCH_TIMEOUT_MS) });
       if (!response.ok) throw new Error(`Не удалось скачать архив коммита (status ${response.status})`);
       await streamResponseToFile(response, path.join(dir, 'repo.zip'), 'Архив превышает лимит 512 МБ');
-      await fs.writeFile(path.join(dir, 'provision.cmd'), commitSessions.buildProvisionScript({ launchFile: options.launchFile }), { encoding: 'utf8' });
+      const provision = options.launchCommand != null
+        ? commitSessions.buildProvisionScript({ launchCommand: options.launchCommand, packageDir: options.packageDir, buildFirst: options.buildFirst })
+        : commitSessions.buildProvisionScript({ launchFile: options.launchFile });
+      await fs.writeFile(path.join(dir, 'provision.cmd'), provision, { encoding: 'utf8' });
       let logonCommand = 'cmd.exe /c C:\\gitora\\provision.cmd';
       const extraFolders = [];
       const sdkDir = await ensureHostSdk();

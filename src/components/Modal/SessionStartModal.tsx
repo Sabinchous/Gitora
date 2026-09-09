@@ -15,8 +15,9 @@ function readStoredLaunchFile(owner: string, repo: string): string {
 }
 
 export const SessionStartModal: React.FC<{ onStarted?: () => void }> = ({ onStarted }) => {
-  const { launchTarget, setLaunchTarget, startSession } = useApp();
+  const { launchTarget, setLaunchTarget, startSession, detection, detecting, detectSessionTarget } = useApp();
   const [launchFile, setLaunchFile] = useState('');
+  const [command, setCommand] = useState('');
   const [memoryMb, setMemoryMb] = useState(4096);
   const [maxAgeMinutes, setMaxAgeMinutes] = useState(240);
   const [networking, setNetworking] = useState(true);
@@ -30,13 +31,29 @@ export const SessionStartModal: React.FC<{ onStarted?: () => void }> = ({ onStar
     if (busyRef.current) return;
     if (launchTarget) {
       setLaunchFile(readStoredLaunchFile(launchTarget.owner, launchTarget.repo));
+      setCommand('');
       setMemoryMb(4096);
       setMaxAgeMinutes(240);
       setNetworking(true);
       setBusy(false);
+      setSubmitError(null);
+      void detectSessionTarget(launchTarget.owner, launchTarget.repo, launchTarget.sha);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetKey]);
+
+  const detectionKey = detection
+    ? `${detection.kind}:${detection.command || ''}:${detection.launchFile || ''}:${detection.packagePath || ''}`
+    : '';
+  useEffect(() => {
+    if (!detection || !launchTarget) return;
+    if (detection.kind === 'node') {
+      setCommand(detection.command || '');
+    } else if (detection.kind === 'dotnet' && detection.launchFile) {
+      setLaunchFile(prev => prev.trim() ? prev : detection.launchFile as string);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detectionKey]);
 
   useEffect(() => {
     if (!launchTarget) return;
@@ -50,9 +67,20 @@ export const SessionStartModal: React.FC<{ onStarted?: () => void }> = ({ onStar
   if (!launchTarget) return null;
 
   const trimmedLaunchFile = launchFile.trim();
+  const trimmedCommand = command.trim();
   const validMemory = Number.isInteger(memoryMb) && memoryMb >= 1024 && memoryMb <= 32768;
   const validAge = Number.isInteger(maxAgeMinutes) && maxAgeMinutes >= 5 && maxAgeMinutes <= 1440;
-  const canStart = trimmedLaunchFile.length > 0 && validMemory && validAge && !busy;
+  const isNode = detection?.kind === 'node';
+  const canStart = (isNode ? trimmedCommand.length > 0 : trimmedLaunchFile.length > 0)
+    && validMemory && validAge && !busy;
+
+  const runtimeLabel = !detection
+    ? null
+    : detection.kind === 'node'
+      ? `Node.js${detection.electron ? ' + Electron' : ''}${detection.packagePath ? ` · ${detection.packagePath}` : ''}`
+      : detection.kind === 'dotnet'
+        ? `.NET · ${detection.launchFile}`
+        : null;
 
   const close = () => {
     if (!busy) setLaunchTarget(null);
@@ -65,20 +93,34 @@ export const SessionStartModal: React.FC<{ onStarted?: () => void }> = ({ onStar
     setBusy(true);
     setSubmitError(null);
     try {
-      try {
-        localStorage.setItem(launchFileStorageKey(launchTarget.owner, launchTarget.repo), trimmedLaunchFile);
-      } catch {
-        // localStorage недоступен — запуск продолжаем без сохранения префилла.
+      if (!isNode) {
+        try {
+          localStorage.setItem(launchFileStorageKey(launchTarget.owner, launchTarget.repo), trimmedLaunchFile);
+        } catch {
+          // localStorage недоступен — запуск продолжаем без сохранения префилла.
+        }
       }
-      const started = await startSession({
-        owner: launchTarget.owner,
-        repo: launchTarget.repo,
-        sha: launchTarget.sha,
-        launchFile: trimmedLaunchFile,
-        memoryMb,
-        maxAgeMinutes,
-        networking,
-      });
+      const started = await startSession(isNode
+        ? {
+          owner: launchTarget.owner,
+          repo: launchTarget.repo,
+          sha: launchTarget.sha,
+          launchCommand: trimmedCommand,
+          packageDir: detection?.packageDir,
+          buildFirst: detection?.buildFirst,
+          memoryMb,
+          maxAgeMinutes,
+          networking,
+        }
+        : {
+          owner: launchTarget.owner,
+          repo: launchTarget.repo,
+          sha: launchTarget.sha,
+          launchFile: trimmedLaunchFile,
+          memoryMb,
+          maxAgeMinutes,
+          networking,
+        });
       if (started) {
         setLaunchTarget(null);
         onStarted?.();
@@ -117,6 +159,28 @@ export const SessionStartModal: React.FC<{ onStarted?: () => void }> = ({ onStar
         </p>
 
         <form onSubmit={(event) => void handleSubmit(event)}>
+          {detecting ? (
+            <p role="status" className="mb-4 text-xs text-[#7D7482]">Определяю рантайм…</p>
+          ) : runtimeLabel ? (
+            <p className="mb-4 text-xs text-[#7D7482]">Обнаружено: <b className="text-[#261732]">{runtimeLabel}</b></p>
+          ) : (
+            <p className="mb-4 text-xs text-[#7D7482]">Рантайм не распознан — укажите файл или команду вручную</p>
+          )}
+          {isNode ? (
+            <label className="block text-xs font-bold">
+              Команда запуска
+              <input
+                autoFocus
+                value={command}
+                disabled={busy}
+                onChange={(event) => setCommand(event.target.value)}
+                placeholder="npx electron ."
+                spellCheck={false}
+                autoComplete="off"
+                className="block w-full h-[42px] border border-[rgba(38,23,50,.12)] bg-[#F3EFE9] rounded-lg px-3 text-sm mt-2 font-mono"
+              />
+            </label>
+          ) : (
           <label className="block text-xs font-bold">
             Файл запуска
             <input
@@ -128,8 +192,12 @@ export const SessionStartModal: React.FC<{ onStarted?: () => void }> = ({ onStar
               className="block w-full h-[42px] border border-[rgba(38,23,50,.12)] bg-[#F3EFE9] rounded-lg px-3 text-sm mt-2"
             />
           </label>
-          {!trimmedLaunchFile ? (
+          )}
+          {!isNode && !trimmedLaunchFile ? (
             <p className="mt-2 text-xs text-[#7D7482]">Укажите .csproj для запуска или .sln для сборки</p>
+          ) : null}
+          {isNode && !trimmedCommand ? (
+            <p className="mt-2 text-xs text-[#7D7482]">Укажите одну команду без &amp; | &gt; &lt; и подстановок</p>
           ) : null}
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-4">

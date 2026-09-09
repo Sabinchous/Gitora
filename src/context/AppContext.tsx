@@ -47,6 +47,7 @@ import {
   Project,
   Release,
   ReleaseAssetSelection,
+  RuntimeDetection,
   SessionLog,
   SessionStartInput,
   UploadFolderSummary,
@@ -112,6 +113,8 @@ interface AppState {
   sessionLogById: Record<string, SessionLog>;
   sessionLogLoading: boolean;
   launchTarget: { owner: string; repo: string; sha: string } | null;
+  detection: RuntimeDetection | null;
+  detecting: boolean;
 }
 
 export interface TeamResource<T> {
@@ -224,6 +227,7 @@ interface AppContextType extends AppState {
   stopSession: (id: string) => Promise<boolean>;
   loadSessionLog: (id: string) => Promise<void>;
   setLaunchTarget: (t: { owner: string; repo: string; sha: string } | null) => void;
+  detectSessionTarget: (owner: string, repo: string, sha: string) => Promise<RuntimeDetection | null>;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -474,6 +478,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [sessionLogById, setSessionLogById] = useState<Record<string, SessionLog>>({});
   const [sessionLogLoading, setSessionLogLoading] = useState(false);
   const [launchTarget, setLaunchTarget] = useState<{ owner: string; repo: string; sha: string } | null>(null);
+  const [detection, setDetection] = useState<RuntimeDetection | null>(null);
+  const [detecting, setDetecting] = useState(false);
   projectRef.current = project;
 
   const notify = (text: string) => {
@@ -722,7 +728,30 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     }
   };
 
+  const detectSessionTarget = async (owner: string, repo: string, sha: string): Promise<RuntimeDetection | null> => {
+    if (!window.electronAPI) {
+      showError('Сессии доступны в приложении Gitora');
+      return null;
+    }
+    setDetecting(true);
+    try {
+      const result = await window.electronAPI.github.detectSessionTarget({ owner, repo, sha });
+      if (result.success && result.data) {
+        setDetection(result.data);
+        return result.data;
+      }
+      showError(result.error || 'Не удалось определить рантайм');
+      return null;
+    } catch (error) {
+      showError(error instanceof Error ? error.message : 'Не удалось определить рантайм');
+      return null;
+    } finally {
+      setDetecting(false);
+    }
+  };
+
   const loadSessionLog = async (id: string): Promise<void> => {
+    if (!id || !window.electronAPI) return;
     if (!id || !window.electronAPI) return;
     const reqId = (sessionLogReqId.current[id] || 0) + 1;
     sessionLogReqId.current[id] = reqId;
@@ -798,6 +827,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setSessionLogById({});
     setSessionLogLoading(false);
     setLaunchTarget(null);
+    setDetection(null);
+    setDetecting(false);
     setGraphLayout(null);
     setLastUpdatedAt(null);
     setConnectionFailure(null);
@@ -1914,6 +1945,9 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       stopSession,
       loadSessionLog,
       setLaunchTarget,
+      detection,
+      detecting,
+      detectSessionTarget,
       refreshAiStatus,
       runAiDiagnostics,
       configureAiClient,

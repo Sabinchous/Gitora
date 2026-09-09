@@ -10,11 +10,14 @@ const {
   buildSdkWrapper,
   buildWsb,
   detectLaunchFile,
+  detectRuntime,
   hasDotnet10,
   isAlive,
   newSession,
   normalizeSessionInput,
+  parsePackageJson,
   readFileTail,
+  sanitizeLaunchCommand,
   sdkCacheDir,
   sessionDir,
   sha512OfFile,
@@ -176,5 +179,62 @@ describe('wrapper and list-sdks parsing', () => {
     expect(() => normalizeSessionInput({ ...good, memoryMb: '8192' })).toThrow();
     expect(normalizeSessionInput({ ...good, networking: 'false' }).networking).toBe(false);
     expect(normalizeSessionInput(good).networking).toBe(true);
+  });
+});
+
+describe('runtime auto-detection', () => {
+  const electronPkg = JSON.stringify({
+    name: 'gitora', main: 'electron/main.cjs',
+    scripts: { dev: 'vite', build: 'vite build', start: 'electron .' },
+    dependencies: { react: '^19.0.0' }, devDependencies: { electron: '^42.0.0' },
+  });
+
+  it('detects node/electron repos and suggests a command', () => {
+    const found = detectRuntime(['myrepo-abc123/package.json', 'myrepo-abc123/electron/main.cjs'], electronPkg);
+    expect(found).toMatchObject({ kind: 'node', packagePath: 'package.json', packageDir: '', electron: true });
+    expect(found.command).toBe('npm start');
+    expect(found.buildFirst).toBe(true);
+    expect(found.scripts).toContain('build');
+  });
+
+  it('handles nested packages, broken json and non-node repos', () => {
+    const nested = detectRuntime(['r-1/sub/package.json'], JSON.stringify({ scripts: { dev: 'vite' } }));
+    expect(nested).toMatchObject({ kind: 'node', packageDir: 'sub', command: 'npm run dev', buildFirst: false });
+    const broken = detectRuntime(['r-1/package.json'], 'not json{{{');
+    expect(broken).toMatchObject({ kind: 'node', command: null });
+    const dotnet = detectRuntime(['r-1/src/App.csproj'], null);
+    expect(dotnet).toEqual({ kind: 'dotnet', launchFile: 'src/App.csproj' });
+    expect(detectRuntime(['r-1/README.md'], null)).toEqual({ kind: 'unknown' });
+  });
+
+  it('parses package.json safely', () => {
+    expect(parsePackageJson('{{{')).toBeNull();
+    expect(parsePackageJson('[]')).toBeNull();
+    expect(parsePackageJson(JSON.stringify({ scripts: { build: 42 } }))).toMatchObject({ scripts: {} });
+    expect(parsePackageJson('﻿' + JSON.stringify({ name: 'x', scripts: { start: 'node .' } }))).toMatchObject({
+      name: 'x',
+      scripts: { start: 'node .' },
+    });
+  });
+
+  it('sanitizes launch commands', () => {
+    expect(sanitizeLaunchCommand('  npx electron .  ')).toBe('npx electron .');
+    for (const bad of ['', 'a && b', 'a | b', 'a > b', 'say "hi"', 'a`b`', 'a\nb', 'x'.repeat(501)]) {
+      expect(() => sanitizeLaunchCommand(bad)).toThrow();
+    }
+  });
+
+  it('generates a node provision profile', () => {
+    const script = buildProvisionScript({ launchCommand: 'npx electron .', packageDir: '', buildFirst: true });
+    expect(script).toContain('where node');
+    expect(script).toContain('node-v');
+    expect(script).toContain('call npm install');
+    expect(script).toContain('npm install failed');
+    expect(script).toContain('call npm run build');
+    expect(script).toContain('vc_redist.x64.exe');
+    expect(script).toContain('npx electron .');
+    expect(script).not.toContain('dotnet');
+    expect(() => buildProvisionScript({})).toThrow();
+    expect(() => buildProvisionScript({ launchCommand: 'a && b' })).toThrow();
   });
 });
