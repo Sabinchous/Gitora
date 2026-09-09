@@ -2,7 +2,8 @@
 const { clipboard } = require('electron');
 const fs = require('fs/promises');
 const nodeFs = require('fs');
-const { once } = require('events');
+const { pipeline } = require('stream/promises');
+const { Transform } = require('stream');
 const path = require('path');
 const crypto = require('crypto');
 const { execFile, spawn } = require('child_process');
@@ -557,18 +558,17 @@ const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 async function streamResponseToFile(response, dest, limitMessage) {
   const announced = Number(response.headers.get('content-length'));
   if (Number.isFinite(announced) && announced > MAX_ARCHIVE_BYTES) throw new Error(limitMessage);
-  const writer = nodeFs.createWriteStream(dest);
   let bytes = 0;
-  try {
-    for await (const chunk of response.body) {
+  const counter = new Transform({
+    transform(chunk, _encoding, callback) {
       bytes += chunk.length;
-      if (bytes > MAX_ARCHIVE_BYTES) throw new Error(limitMessage);
-      if (!writer.write(chunk)) await once(writer, 'drain');
-    }
-    writer.end();
-    await once(writer, 'finish');
+      if (bytes > MAX_ARCHIVE_BYTES) callback(new Error(limitMessage));
+      else callback(null, chunk);
+    },
+  });
+  try {
+    await pipeline(response.body, counter, nodeFs.createWriteStream(dest));
   } catch (error) {
-    try { writer.destroy(); } catch {}
     await fs.rm(dest, { force: true });
     throw error;
   }
@@ -621,6 +621,56 @@ async function removeSessionDir(dir) {
   } catch {}
 }
 
+function orphanRecordPath() {
+  return path.join(app.getPath('userData'), 'gitora-sessions.json');
+}
+
+async function recordOrphanSession(entry) {
+  try {
+    await fs.writeFile(orphanRecordPath(), JSON.stringify({
+      id: entry.id, pid: entry.pid, dir: entry.dir, expiresAt: entry.expiresAt || 0,
+    }), { encoding: 'utf8', mode: 0o600 });
+  } catch {}
+}
+
+async function clearOrphanRecord(id) {
+  try {
+    const raw = await fs.readFile(orphanRecordPath(), 'utf8');
+    if (JSON.parse(raw || '{}')?.id === id) await fs.rm(orphanRecordPath(), { force: true });
+  } catch {}
+}
+
+// Reaps a VM orphaned by a main-process restart: the detached sandbox may
+// still run while the registry is gone. Kill + clean, then sweep leftovers.
+async function reapOrphanSessions() {
+  try {
+    const record = JSON.parse(await fs.readFile(orphanRecordPath(), 'utf8') || '{}');
+    if (record && Number.isInteger(record.pid)) {
+      try {
+        await execFileAsync('taskkill.exe', ['/PID', String(record.pid), '/T', '/F'], { windowsHide: true });
+      } catch {}
+    }
+    if (record && record.dir) await fs.rm(record.dir, { recursive: true, force: true });
+  } catch {}
+  try {
+    await fs.rm(orphanRecordPath(), { force: true });
+  } catch {}
+  try {
+    await fs.rm(sessionsRootDir(), { recursive: true, force: true });
+    await fs.mkdir(sessionsRootDir(), { recursive: true });
+  } catch {}
+}
+
+async function expireSession(id) {
+  const entry = commitSessionRegistry.get(id);
+  if (!entry) return;
+  entry.state = 'stopping';
+  await killSessionVm(entry);
+  await removeSessionDir(entry.dir);
+  commitSessionRegistry.delete(id);
+  await clearOrphanRecord(id);
+}
+
 async function killSessionVm(entry) {
   try {
     if (commitSessions.isAlive(entry.pid)) {
@@ -644,11 +694,35 @@ async function runDotnetListSdks(dotnetExe) {
 }
 
 // Host SDK cache for sessions (phase 2): reuse beats a 300MB download per run.
-// Priority: existing cache → machine-wide install (mapped, never copied) →
-// one-time download. Returns the host dir to map read-only, or ''.
+// Priority: existing version-pinned cache → machine-wide install (mapped,
+// never copied) → one-time verified download. In-flight calls share one
+// promise (no parallel 300MB fetches). Returns the host dir to map
+// read-only, or ''.
+let sdkEnsurePromise = null;
+
+function sdkVersionMarker(cache) {
+  return path.join(cache, '.sdk-version');
+}
+
 async function ensureHostSdk() {
+  if (!sdkEnsurePromise) sdkEnsurePromise = doEnsureHostSdk().finally(() => { sdkEnsurePromise = null; });
+  return sdkEnsurePromise;
+}
+
+function psQuote(value) {
+  return `'${String(value || '').replace(/'/g, "''")}'`;
+}
+
+async function doEnsureHostSdk() {
   const cache = commitSessions.sdkCacheDir(app.getPath('userData'));
-  if (commitSessions.hasDotnet10(await runDotnetListSdks(path.join(cache, 'dotnet.exe')))) return cache;
+  try {
+    const marker = await fs.readFile(sdkVersionMarker(cache), 'utf8');
+    if (marker.trim() === commitSessions.PINNED_DOTNET_SDK) {
+      const list = await runDotnetListSdks(path.join(cache, 'dotnet.exe'));
+      if (commitSessions.hasDotnet10(list)) return cache;
+    }
+    await fs.rm(cache, { recursive: true, force: true });
+  } catch {}
   const machineDir = 'C:\\Program Files\\dotnet';
   if (commitSessions.hasDotnet10(await runDotnetListSdks(path.join(machineDir, 'dotnet.exe')))) return machineDir;
   try {
@@ -657,13 +731,24 @@ async function ensureHostSdk() {
     const response = await fetch(commitSessions.DOTNET_SDK_URL, { signal: AbortSignal.timeout(10 * 60 * 1000) });
     if (!response.ok) throw new Error(`status ${response.status}`);
     await streamResponseToFile(response, zipPath, 'SDK превышает лимит 512 МБ');
-    await execFileAsync('powershell.exe', ['-NoProfile', '-Command', `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${cache}' -Force`], { windowsHide: true });
-    await fs.rm(zipPath, { force: true });
-    if (commitSessions.hasDotnet10(await runDotnetListSdks(path.join(cache, 'dotnet.exe')))) return cache;
+    if (!(await commitSessions.verifyFileSha512(zipPath, commitSessions.DOTNET_SDK_SHA512))) {
+      throw new Error('SHA512 mismatch');
+    }
+    const staging = `${cache}.tmp.${process.pid}`;
+    await fs.rm(staging, { recursive: true, force: true });
+    await execFileAsync('powershell.exe', ['-NoProfile', '-Command',
+      `Expand-Archive -LiteralPath ${psQuote(zipPath)} -DestinationPath ${psQuote(staging)} -Force`], { windowsHide: true, timeout: 10 * 60 * 1000 });
+    await fs.rm(cache, { recursive: true, force: true });
+    await fs.rename(staging, cache);
+    await fs.writeFile(sdkVersionMarker(cache), commitSessions.PINNED_DOTNET_SDK, { encoding: 'utf8' });
+    const list = await runDotnetListSdks(path.join(cache, 'dotnet.exe'));
+    if (commitSessions.hasDotnet10(list)) return cache;
+    throw new Error('SDK check failed after install');
   } catch (error) {
     console.error('[sessions] sdk cache failed:', error instanceof Error ? error.message : error);
+    await fs.rm(cache, { recursive: true, force: true });
+    return '';
   }
-  return '';
 }
 
 async function refreshSessionLiveness(entry) {
@@ -1684,14 +1769,8 @@ if (!isMcpServer && !hasSingleInstanceLock) {
   app.whenReady().then(async () => {
     mcpLog('gitora_start', { pid: process.pid, version: app.getVersion() });
     await restoreToken();
-    // Orphaned session dirs (crash/restart leave UUID folders behind; live
-    // VMs are untracked after restart anyway) — best-effort sweep.
-    void (async () => {
-      try {
-        await fs.rm(sessionsRootDir(), { recursive: true, force: true });
-        await fs.mkdir(sessionsRootDir(), { recursive: true });
-      } catch {}
-    })();
+    // Reap VMs orphaned by a previous main-process run, then sweep leftovers.
+    void reapOrphanSessions();
     createWindow();
     // MCP не должен блокировать создание окна и загрузку Gitora.
     void startMcpBridge();
@@ -1903,12 +1982,17 @@ ipcMain.handle('session:start', result(async (_event, input) => {
       child.once('exit', () => {
         const live = commitSessionRegistry.get(entry.id);
         if (live) {
+          if (live.expireTimer) clearTimeout(live.expireTimer);
           live.state = 'gone';
           void removeSessionDir(live.dir);
           commitSessionRegistry.delete(live.id);
+          void clearOrphanRecord(live.id);
         }
       });
       commitSessionRegistry.set(entry.id, entry);
+      await recordOrphanSession(entry);
+      entry.expireTimer = setTimeout(() => { void expireSession(entry.id); }, options.maxAgeMinutes * 60 * 1000);
+      if (entry.expireTimer.unref) entry.expireTimer.unref();
       return publicSession(entry);
     } catch (error) {
       await removeSessionDir(dir);
@@ -1928,6 +2012,7 @@ ipcMain.handle('session:stop', result(async (_event, id) => {
   const sessionId = typeof id === 'string' ? id : id?.id;
   const entry = commitSessionRegistry.get(sessionId);
   if (!entry) throw new Error('Сессия не найдена');
+  if (entry.expireTimer) clearTimeout(entry.expireTimer);
   entry.state = 'stopping';
   await killSessionVm(entry);
   // Confirm death BEFORE unmapping the dir: removing the mapped folder from
@@ -1944,6 +2029,7 @@ ipcMain.handle('session:stop', result(async (_event, id) => {
   }
   await removeSessionDir(entry.dir);
   commitSessionRegistry.delete(entry.id);
+  await clearOrphanRecord(entry.id);
   return { id: entry.id, state: 'gone' };
 }));
 
@@ -1953,13 +2039,11 @@ ipcMain.handle('session:log', result(async (_event, id) => {
   const sessionId = typeof id === 'string' ? id : id?.id;
   const entry = commitSessionRegistry.get(sessionId);
   if (!entry) throw new Error('Сессия не найдена');
-  let log = '';
-  try {
-    log = await fs.readFile(path.join(entry.dir, 'session.log'), 'utf8');
-  } catch {
-    log = '';
-  }
-  return { id: entry.id, state: entry.state, log: commitSessions.tailText(log) };
+  await refreshSessionLiveness(entry);
+  const live = commitSessionRegistry.get(sessionId);
+  if (!live) throw new Error('Сессия завершена');
+  const raw = await commitSessions.readFileTail(path.join(live.dir, 'session.log'));
+  return { id: live.id, state: live.state, log: commitSessions.tailText(raw) };
 }));
 
 ipcMain.handle('github:repos', result(async () => (

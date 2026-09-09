@@ -8,14 +8,19 @@
 
 const crypto = require('crypto');
 const path = require('path');
+const fs = require('fs/promises');
+const nodeFs = require('fs');
 
 const SESSION_STATES = ['starting', 'running', 'stopping', 'gone'];
 const RUNNABLE_EXTENSIONS = ['.csproj', '.vbproj', '.fsproj'];
 const BUILDABLE_EXTENSIONS = [...RUNNABLE_EXTENSIONS, '.sln', '.slnx'];
 const LAUNCH_FILE_PATTERN = /^[A-Za-z0-9._\-/ ]+$/;
 // Pinned SDK for the host cache (matches the dev environment).
+// SHA512 from the official release-metadata index
+// (builds.dotnet.microsoft.com/dotnet/release-metadata/10.0/releases.json).
 const PINNED_DOTNET_SDK = '10.0.400';
 const DOTNET_SDK_URL = `https://builds.dotnet.microsoft.com/dotnet/Sdk/${PINNED_DOTNET_SDK}/dotnet-sdk-${PINNED_DOTNET_SDK}-win-x64.zip`;
+const DOTNET_SDK_SHA512 = '9b8b88590e4da131bfd0da7aa089d0fc04d5418d5f8607ec13d55dc5a17b4399afd54d496c12657fa05c6c6546dc5eab930f26ac6c50f2d3a7712c0fb378c366';
 const DEFAULT_MAX_AGE_MINUTES = 240;
 const DEFAULT_MEMORY_MB = 4096;
 
@@ -119,24 +124,31 @@ function normalizeSessionInput(input) {
   }
   if (!/^[0-9a-f]{40}$/i.test(sha)) throw new Error('Некорректный SHA коммита');
   const launchFile = validateLaunchFile(data.launchFile);
-  const memoryMb = data.memoryMb === undefined ? DEFAULT_MEMORY_MB : Number(data.memoryMb);
+  if (data.memoryMb !== undefined && typeof data.memoryMb !== 'number') {
+    throw new Error('Некорректный лимит памяти VM (1024–32768 МБ)');
+  }
+  const memoryMb = data.memoryMb === undefined ? DEFAULT_MEMORY_MB : data.memoryMb;
   if (!Number.isInteger(memoryMb) || memoryMb < 1024 || memoryMb > 32768) {
     throw new Error('Некорректный лимит памяти VM (1024–32768 МБ)');
   }
-  const maxAgeMinutes = data.maxAgeMinutes === undefined ? DEFAULT_MAX_AGE_MINUTES : Number(data.maxAgeMinutes);
-  if (!Number.isFinite(maxAgeMinutes) || maxAgeMinutes < 5 || maxAgeMinutes > 1440) {
+  if (data.maxAgeMinutes !== undefined && typeof data.maxAgeMinutes !== 'number') {
     throw new Error('Некорректный лимит времени сессии (5–1440 минут)');
   }
-  return { owner, repo, sha, launchFile, memoryMb, networking: data.networking !== false, maxAgeMinutes };
+  const maxAgeMinutes = data.maxAgeMinutes === undefined ? DEFAULT_MAX_AGE_MINUTES : data.maxAgeMinutes;
+  if (!Number.isInteger(maxAgeMinutes) || maxAgeMinutes < 5 || maxAgeMinutes > 1440) {
+    throw new Error('Некорректный лимит времени сессии (5–1440 минут)');
+  }
+  return { owner, repo, sha, launchFile, memoryMb, networking: data.networking === undefined ? true : data.networking === true, maxAgeMinutes };
 }
 
 function sdkCacheDir(userDataDir) {
   return path.join(userDataDir, 'gitora-sdkcache');
 }
 
-// Parses `dotnet --list-sdks` output; true when a 10.x SDK is present.
+// Parses `dotnet --list-sdks` output; true when a 10.x SDK is present
+// (stable or preview).
 function hasDotnet10(listSdksOutput) {
-  return String(listSdksOutput || '').split('\n').some(line => /^\s*10\.\d+\.\d+\s+\[/.test(line));
+  return String(listSdksOutput || '').split('\n').some(line => /^\s*10\.\d+\.\d+(?:-[^\s[]+)?\s+\[/.test(line));
 }
 
 // Tail helper for session:log (host reads the mapped session.log).
@@ -147,6 +159,41 @@ function tailText(text, maxBytes = 65536) {
   let start = buf.length - maxBytes;
   while (start < buf.length && (buf[start] & 0xc0) === 0x80) start += 1;
   return '…\n' + buf.slice(start).toString('utf8');
+}
+
+// Reads only the tail of a (potentially huge, guest-written) file.
+async function readFileTail(filePath, maxBytes = 70000) {
+  let handle = null;
+  try {
+    handle = await fs.open(filePath, 'r');
+    const { size } = await handle.stat();
+    const take = Math.min(size, maxBytes);
+    const buf = Buffer.alloc(take);
+    await handle.read(buf, 0, take, size - take);
+    return buf.toString('utf8');
+  } catch {
+    return '';
+  } finally {
+    try {
+      if (handle) await handle.close();
+    } catch {}
+  }
+}
+
+async function sha512OfFile(filePath) {
+  const hash = crypto.createHash('sha512');
+  const stream = nodeFs.createReadStream(filePath);
+  try {
+    for await (const chunk of stream) hash.update(chunk);
+  } finally {
+    stream.destroy();
+  }
+  return hash.digest('hex');
+}
+
+async function verifyFileSha512(filePath, expectedHex) {
+  const actual = await sha512OfFile(filePath);
+  return actual.toLowerCase() === String(expectedHex || '').toLowerCase();
 }
 
 // Provisioning script run once at VM logon. Installs .NET SDK when missing
@@ -221,6 +268,7 @@ module.exports = {
   BUILDABLE_EXTENSIONS,
   DEFAULT_MAX_AGE_MINUTES,
   DEFAULT_MEMORY_MB,
+  DOTNET_SDK_SHA512,
   DOTNET_SDK_URL,
   PINNED_DOTNET_SDK,
   RUNNABLE_EXTENSIONS,
@@ -235,9 +283,12 @@ module.exports = {
   isRunnableLaunchFile,
   newSession,
   normalizeSessionInput,
+  readFileTail,
   sdkCacheDir,
   sessionDir,
   sessionsRoot,
+  sha512OfFile,
   tailText,
   validateLaunchFile,
+  verifyFileSha512,
 };

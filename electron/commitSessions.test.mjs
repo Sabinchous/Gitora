@@ -1,5 +1,8 @@
 import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 const require = createRequire(import.meta.url);
 const {
@@ -11,10 +14,13 @@ const {
   isAlive,
   newSession,
   normalizeSessionInput,
+  readFileTail,
   sdkCacheDir,
   sessionDir,
+  sha512OfFile,
   tailText,
   validateLaunchFile,
+  verifyFileSha512,
 } = require('./commitSessions.cjs');
 
 describe('launch file handling', () => {
@@ -115,5 +121,60 @@ describe('session input normalization (phase 2)', () => {
     expect(wsb).toContain('<SandboxFolder>C:\\sdkcache</SandboxFolder>');
     expect(wsb).toContain('<ReadOnly>true</ReadOnly>');
     expect(() => buildWsb({ hostFolder: 'C:\\s', logonCommand: 'x', extraFolders: [{ hostFolder: 'rel' }] })).toThrow();
+  });
+});
+
+describe('tail and hash file helpers', () => {
+  it('takes exact tails and never splits multibyte chars', () => {
+    expect(tailText('abcdef', 4)).toBe('…\ncdef');
+    expect(tailText('abc', 99)).toBe('abc');
+    // 2-byte 'é' cut mid-char must shift to a boundary, never emit U+FFFD.
+    const text = `x${'é'.repeat(10)}y`;
+    const tailed = tailText(text, 5);
+    expect(tailed.startsWith('…\n')).toBe(true);
+    expect(tailed).not.toContain('�');
+  });
+
+  it('reads only the tail and verifies sha512', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'gitora-tail-'));
+    try {
+      const file = path.join(dir, 'log.txt');
+      await fs.writeFile(file, '0123456789ABCDEFGHIJ', 'utf8');
+      expect(await readFileTail(file, 6)).toBe('EFGHIJ');
+      expect(await readFileTail(path.join(dir, 'missing.txt'), 6)).toBe('');
+      const bin = path.join(dir, 'a.bin');
+      await fs.writeFile(bin, 'abc', 'utf8');
+      expect(await sha512OfFile(bin)).toBe(
+        'ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f',
+      );
+      expect(await verifyFileSha512(bin, 'DDAF35A193617ABACC417349AE20413112E6FA4E89A97EA20A9EEEE64B55D39A2192992A274FC1A836BA3C23A3FEEBBD454D4423643CE80E2A9AC94FA54CA49F')).toBe(true);
+      expect(await verifyFileSha512(bin, '0'.repeat(128))).toBe(false);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('wrapper and list-sdks parsing', () => {
+  it('pre-seeds dotnet env and calls provision', () => {
+    const wrapper = buildSdkWrapper();
+    expect(wrapper).toContain('set "DOTNET_ROOT=C:\\sdkcache"');
+    expect(wrapper).toContain('set "PATH=C:\\sdkcache;%PATH%"');
+    expect(wrapper).toContain('DOTNET_CLI_TELEMETRY_OPTOUT=1');
+    expect(wrapper).toContain('call C:\\gitora\\provision.cmd');
+  });
+
+  it('parses CRLF output and preview versions', () => {
+    expect(hasDotnet10('10.0.400 [C:\\sdk]\r\n9.0.100 [x]\r\n')).toBe(true);
+    expect(hasDotnet10('10.0.400-preview.1 [C:\\sdk]\r\n')).toBe(true);
+    expect(hasDotnet10('9.0.100 [x]\r\n')).toBe(false);
+  });
+
+  it('rejects sloppy option types', () => {
+    const good = { owner: 'a', repo: 'b', sha: 'c'.repeat(40), launchFile: 'a.csproj' };
+    expect(() => normalizeSessionInput({ ...good, maxAgeMinutes: 60.5 })).toThrow();
+    expect(() => normalizeSessionInput({ ...good, memoryMb: '8192' })).toThrow();
+    expect(normalizeSessionInput({ ...good, networking: 'false' }).networking).toBe(false);
+    expect(normalizeSessionInput(good).networking).toBe(true);
   });
 });
