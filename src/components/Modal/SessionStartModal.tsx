@@ -43,7 +43,7 @@ export const SessionStartModal: React.FC<{ onStarted?: () => void }> = ({ onStar
   }, [targetKey]);
 
   const detectionKey = detection
-    ? `${detection.kind}:${detection.command || ''}:${detection.launchFile || ''}:${detection.packagePath || ''}`
+    ? `${detection.kind}:${detection.command || ''}:${detection.launchFile || ''}:${detection.packagePath || ''}:${detection.entry || ''}:${detection.packageDir || ''}`
     : '';
   useEffect(() => {
     if (!detection || !launchTarget) return;

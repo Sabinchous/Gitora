@@ -13,6 +13,7 @@ const {
   detectLaunchFile,
   detectRuntime,
   hasDotnet10,
+  inferRuntime,
   isAlive,
   newSession,
   nodeCacheDir,
@@ -233,11 +234,26 @@ describe('runtime auto-detection', () => {
     const nomanifest = detectRuntime(['pyapp-1/app.py'], null);
     expect(nomanifest).toEqual({ kind: 'unknown' });
     const script = buildProvisionScript({ runtime: 'python', launchCommand: 'python app.py', packageDir: '' });
-    expect(script).toContain('python-3.13.9-amd64.exe');
+    expect(script).toContain('python-3.13.15-amd64.exe');
+    expect(script).toContain('PYTHONUNBUFFERED=1');
+    expect(script).toContain('python --version');
+    expect(script).toContain('python installer hash mismatch');
     expect(script).toContain('call python -m pip install -r requirements.txt');
+    expect(script).toContain('call python -m pip install .');
+    expect(script).toContain('Pipfile found');
     expect(script).toContain('python app.py');
     expect(script).toContain('apprun.log');
     expect(script).not.toContain('\\"');
+  });
+
+  it('infers runtimes for bare commands', () => {
+    expect(inferRuntime('python app.py')).toBe('python');
+    expect(inferRuntime('python3.11 app.py')).toBe('python');
+    expect(inferRuntime('python.exe app.py')).toBe('python');
+    expect(inferRuntime('py app.py')).toBe('python');
+    expect(inferRuntime('npx electron .')).toBe('node');
+    expect(inferRuntime('pythonic-tool')).toBe('node');
+    expect(inferRuntime('')).toBe('node');
   });
 
   it('parses package.json safely', () => {

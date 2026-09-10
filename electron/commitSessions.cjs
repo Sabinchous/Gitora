@@ -27,8 +27,10 @@ const PINNED_NODE = '22.23.2';
 const NODE_URL = `https://nodejs.org/dist/v${PINNED_NODE}/node-v${PINNED_NODE}-win-x64.zip`;
 const NODE_SHA256 = '1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97';
 // Pinned CPython for the python runtime (official installer, silent mode).
-const PINNED_PYTHON = '3.13.9';
+// SHA256 verified 2026-09-09 by downloading python.org/ftp artifact.
+const PINNED_PYTHON = '3.13.15';
 const PYTHON_URL = `https://www.python.org/ftp/python/${PINNED_PYTHON}/python-${PINNED_PYTHON}-amd64.exe`;
+const PYTHON_SHA256 = 'edec09c4853aeae9ac36efb8c9f95b6b8e2fee65eee56d9767a8b7c69c574403';
 const PYTHON_ENTRY_CANDIDATES = ['app.py', 'main.py', 'manage.py', 'run.py', 'wsgi.py', '__main__.py'];
 const PYTHON_MANIFESTS = ['requirements.txt', 'pyproject.toml', 'setup.py', 'setup.cfg', 'Pipfile'];
 const DEFAULT_MAX_AGE_MINUTES = 240;
@@ -96,6 +98,12 @@ function parsePackageJson(text) {
   } catch {
     return null;
   }
+}
+
+// Infers node vs python for a bare launch command (UI always sends an
+// explicit runtime; this is the back-compat path).
+function inferRuntime(command) {
+  return /^python(\d(\.\d+)?)?(\.exe)?\s|^py\s/i.test(String(command || '')) ? 'python' : 'node';
 }
 
 // Single launch command executed inside the disposable VM. The VM is wiped
@@ -246,8 +254,7 @@ function normalizeSessionInput(input) {
     throw new Error('Некорректный рантайм');
   }
   const runtime = explicitRuntime
-    || (/^python3?\s/i.test(String(data.launchCommand || '')) ? 'python'
-      : (data.launchCommand !== undefined ? 'node' : 'dotnet'));
+    || (data.launchCommand !== undefined ? inferRuntime(data.launchCommand) : 'dotnet');
   if (runtime === 'node' || runtime === 'python') {
     launchCommand = sanitizeLaunchCommand(data.launchCommand);
     packageDir = String(data.packageDir == null ? '' : data.packageDir).replace(/\\/g, '/').replace(/(^\/+|\/+$)/g, '');
@@ -410,7 +417,7 @@ function expandArchiveBlock() {
 function buildProvisionScript({ runtime, launchFile, launchCommand, packageDir = '', buildFirst = false, dotnetChannel = '10.0' }) {
   const profile = runtime === 'python' || runtime === 'node' || runtime === 'dotnet'
     ? runtime
-    : (launchCommand !== undefined ? 'node' : 'dotnet');
+    : (launchCommand !== undefined ? inferRuntime(launchCommand) : 'dotnet');
   if (profile === 'python') {
     const command = sanitizeLaunchCommand(launchCommand);
     const pkgSub = String(packageDir || '').replace(/\\/g, '/').replace(/(^\/+|\/+$)/g, '');
@@ -422,15 +429,38 @@ function buildProvisionScript({ runtime, launchFile, launchCommand, packageDir =
     const pyHome = `%LOCALAPPDATA%\\Programs\\Python\\Python${pyMajor}${pyMinor}`;
     return '@echo off\r\n'
       + 'echo [%TIME%] logon start >> C:\\gitora\\session.log\r\n'
-      + 'where python >> C:\\gitora\\session.log 2>&1\r\n'
+      + 'set PYTHONUNBUFFERED=1\r\n'
+      + 'python --version >> C:\\gitora\\session.log 2>&1\r\n'
       + 'if not errorlevel 1 goto :have_python\r\n'
       + 'echo [%TIME%] installing Python >> C:\\gitora\\session.log\r\n'
       + `powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest ${PYTHON_URL} -OutFile C:\\gitora\\python-installer.exe" >> C:\\gitora\\session.log 2>&1\r\n`
+      + `certutil -hashfile C:\\gitora\\python-installer.exe SHA256 | findstr /C:"${PYTHON_SHA256}" >nul\r\n`
+      + 'if %ERRORLEVEL% NEQ 0 (\r\n'
+      + '  echo [%TIME%] python installer hash mismatch >> C:\\gitora\\session.log\r\n'
+      + '  exit /b 1\r\n'
+      + ')\r\n'
       + 'C:\\gitora\\python-installer.exe /quiet InstallAllUsers=0 PrependPath=1 Include_test=0 >> C:\\gitora\\session.log 2>&1\r\n'
       + `set "PATH=${pyHome};${pyHome}\\Scripts;%PATH%"\r\n`
       + ':have_python\r\n'
       + 'python --version >> C:\\gitora\\session.log 2>&1\r\n'
       + expandArchiveBlock()
+      + `echo "[%TIME%] pip install ${pkgSub || '.'}" >> C:\\gitora\\session.log\r\n`
+      + `cd /d "${pkgWin}"\r\n`
+      + 'if exist requirements.txt (\r\n'
+      + '  call python -m pip install -r requirements.txt >> C:\\gitora\\session.log 2>&1\r\n'
+      + ') else if exist pyproject.toml (\r\n'
+      + '  call python -m pip install . >> C:\\gitora\\session.log 2>&1\r\n'
+      + ') else if exist setup.py (\r\n'
+      + '  call python -m pip install . >> C:\\gitora\\session.log 2>&1\r\n'
+      + ') else if exist setup.cfg (\r\n'
+      + '  call python -m pip install . >> C:\\gitora\\session.log 2>&1\r\n'
+      + ') else if exist Pipfile (\r\n'
+      + '  echo [%TIME%] Pipfile found: install dependencies manually >> C:\\gitora\\session.log\r\n'
+      + ')\r\n'
+      + 'if %ERRORLEVEL% NEQ 0 (\r\n'
+      + '  echo [%TIME%] pip install failed >> C:\\gitora\\session.log\r\n'
+      + '  exit /b 1\r\n'
+      + ')\r\n'
       + `echo "[%TIME%] pip install ${pkgSub || '.'}" >> C:\\gitora\\session.log\r\n`
       + `cd /d "${pkgWin}"\r\n`
       + 'if exist requirements.txt (\r\n'
@@ -512,14 +542,7 @@ function buildProvisionScript({ runtime, launchFile, launchCommand, packageDir =
     + 'set "PATH=%PATH%;C:\\gitora\\dotnet"\r\n'
     + ':have_dotnet\r\n'
     + 'dotnet --version >> C:\\gitora\\session.log 2>&1\r\n'
-    + `powershell -NoProfile -Command "Expand-Archive -LiteralPath 'C:\\gitora\\repo.zip' -DestinationPath 'C:\\gitora\\work' -Force" >> C:\\gitora\\session.log 2>&1\r\n`
-    + `powershell -NoProfile -Command "$d=@(Get-ChildItem 'C:\\gitora\\work' -Directory); if ($d.Count -ne 1) { exit 1 }; $d[0].FullName | Out-File 'C:\\gitora\\srcdir.txt' -Encoding ascii" >> C:\\gitora\\session.log 2>&1\r\n`
-    + 'if %ERRORLEVEL% NEQ 0 (\r\n'
-    + '  echo [%TIME%] bad archive layout, expected one top folder >> C:\\gitora\\session.log\r\n'
-    + '  exit /b 1\r\n'
-    + ')\r\n'
-    + 'for /f "delims=" %%D in (C:\\gitora\\srcdir.txt) do set SRCDIR=%%D\r\n'
-    + 'if not defined SRCDIR exit /b 1\r\n'
+    + expandArchiveBlock()
     + `echo "[%TIME%] build start ${file}" >> C:\\gitora\\session.log\r\n`
     + (run
       ? `dotnet run --project "%SRCDIR%\\${winFile}" -c Release >> C:\\gitora\\session.log 2>&1\r\n`
@@ -572,6 +595,9 @@ module.exports = {
   NODE_URL,
   PINNED_DOTNET_SDK,
   PINNED_NODE,
+  PINNED_PYTHON,
+  PYTHON_SHA256,
+  PYTHON_URL,
   RUNNABLE_EXTENSIONS,
   SESSION_STATES,
   buildProvisionScript,
@@ -582,6 +608,7 @@ module.exports = {
   detectRuntime,
   escapeXml,
   hasDotnet10,
+  inferRuntime,
   isAlive,
   isRunnableLaunchFile,
   newSession,
