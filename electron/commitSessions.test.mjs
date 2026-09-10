@@ -17,9 +17,11 @@ const {
   newSession,
   nodeCacheDir,
   nodeCacheWritableDir,
+  nodeMajorOk,
   normalizeSessionInput,
   parsePackageJson,
   readFileTail,
+  removeNodeArtifacts,
   sanitizeLaunchCommand,
   sdkCacheDir,
   sessionDir,
@@ -270,5 +272,28 @@ describe('runtime auto-detection', () => {
     expect(wrapper).toContain('electron_config_cache=C:\\nodecache\\writable\\electron-cache');
     expect(wrapper).toContain('set "PATH=C:\\nodecache\\node;%PATH%"');
     expect(wrapper).toContain('call C:\\gitora\\provision.cmd');
+  });
+
+  it('gates node versions and cleans only node artifacts', async () => {
+    expect(nodeMajorOk('v24.19.0')).toBe(true);
+    expect(nodeMajorOk('v20.0.0')).toBe(true);
+    expect(nodeMajorOk('v18.20.0')).toBe(false);
+    expect(nodeMajorOk('')).toBe(false);
+    expect(nodeMajorOk('garbage')).toBe(false);
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'gitora-cache-'));
+    try {
+      const cache = path.join(dir, 'gitora-nodecache');
+      const writable = path.join(cache, 'writable', 'npm-cache');
+      await fs.mkdir(path.join(cache, 'node'), { recursive: true });
+      await fs.writeFile(path.join(cache, 'node.zip'), 'zip', 'utf8');
+      await fs.writeFile(path.join(cache, '.node-version'), '22.23.2', 'utf8');
+      await fs.mkdir(writable, { recursive: true });
+      await fs.writeFile(path.join(writable, 'keepme'), 'x', 'utf8');
+      await removeNodeArtifacts(cache);
+      expect(await fs.readdir(cache)).toEqual(['writable']);
+      expect(await fs.readFile(path.join(writable, 'keepme'), 'utf8')).toBe('x');
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
 });

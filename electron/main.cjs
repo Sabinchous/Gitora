@@ -741,11 +741,6 @@ async function runNodeVersion(nodeExe) {
   }
 }
 
-function nodeMajorOk(version) {
-  const match = /^v(\d+)\./.exec(String(version || '').trim());
-  return match ? Number(match[1]) >= 20 : false;
-}
-
 // Host SDK cache for sessions (phase 2): reuse beats a 300MB download per run.
 // Priority: existing version-pinned cache → machine-wide install (mapped,
 // never copied) → one-time verified download. In-flight calls share one
@@ -781,22 +776,26 @@ async function doEnsureHostNode() {
     await fs.mkdir(path.join(writable, 'electron-cache'), { recursive: true });
   } catch {}
   const machineDir = 'C:\\Program Files\\nodejs';
-  if (nodeMajorOk(await runNodeVersion(path.join(machineDir, 'node.exe')))) {
+  if (commitSessions.nodeMajorOk(await runNodeVersion(path.join(machineDir, 'node.exe')))) {
     return { nodeDir: machineDir, writableDir: writable };
   }
   // Scoped cleanup: node artifacts only, never the writable npm/electron caches.
-  const removeNodeArtifacts = async () => {
-    try {
-      await fs.rm(path.join(cache, 'node'), { recursive: true, force: true });
-      await fs.rm(path.join(cache, 'node.zip'), { force: true });
-      await fs.rm(path.join(cache, '.node-version'), { force: true });
-    } catch {}
-  };
+  const removeNodeArtifacts = () => commitSessions.removeNodeArtifacts(cache);
+  // Sweep stale staging dirs from other pids (best effort).
+  try {
+    const entries = await fs.readdir(path.dirname(cache), { withFileTypes: true });
+    const prefix = `${path.basename(cache)}.tmp.`;
+    for (const entry of entries) {
+      if (entry.isDirectory() && entry.name.startsWith(prefix)) {
+        await fs.rm(path.join(path.dirname(cache), entry.name), { recursive: true, force: true });
+      }
+    }
+  } catch {}
   try {
     const marker = await fs.readFile(path.join(cache, '.node-version'), 'utf8');
     if (marker.trim() === commitSessions.PINNED_NODE) {
       const exe = path.join(cache, 'node', `node-v${commitSessions.PINNED_NODE}-win-x64`, 'node.exe');
-      if (nodeMajorOk(await runNodeVersion(exe))) return { nodeDir: path.dirname(exe), writableDir: writable };
+      if (commitSessions.nodeMajorOk(await runNodeVersion(exe))) return { nodeDir: path.dirname(exe), writableDir: writable };
     }
     await removeNodeArtifacts();
   } catch {}
@@ -822,7 +821,7 @@ async function doEnsureHostNode() {
     await fs.rm(staging, { recursive: true, force: true });
     await fs.writeFile(path.join(cache, '.node-version'), commitSessions.PINNED_NODE, { encoding: 'utf8' });
     const exe = path.join(cache, 'node', `node-v${commitSessions.PINNED_NODE}-win-x64`, 'node.exe');
-    if (nodeMajorOk(await runNodeVersion(exe))) return { nodeDir: path.dirname(exe), writableDir: writable };
+    if (commitSessions.nodeMajorOk(await runNodeVersion(exe))) return { nodeDir: path.dirname(exe), writableDir: writable };
     throw new Error('Node check failed after install');
   } catch (error) {
     console.error('[sessions] node cache failed:', error instanceof Error ? error.message : error);
@@ -2216,7 +2215,11 @@ ipcMain.handle('session:log', result(async (_event, id) => {
   const live = commitSessionRegistry.get(sessionId);
   if (!live) throw new Error('Сессия завершена');
   const raw = await commitSessions.readFileTail(path.join(live.dir, 'session.log'));
-  return { id: live.id, state: live.state, log: commitSessions.tailText(raw) };
+  const appRaw = await commitSessions.readFileTail(path.join(live.dir, 'apprun.log'));
+  const log = appRaw
+    ? `${commitSessions.tailText(raw)}\n\n--- app output ---\n${commitSessions.tailText(appRaw)}`
+    : commitSessions.tailText(raw);
+  return { id: live.id, state: live.state, log };
 }));
 
 ipcMain.handle('github:repos', result(async () => (

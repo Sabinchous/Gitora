@@ -276,6 +276,22 @@ function hasDotnet10(listSdksOutput) {
   return String(listSdksOutput || '').split('\n').some(line => /^\s*10\.\d+\.\d+(?:-[^\s[]+)?\s+\[/.test(line));
 }
 
+// True for `node --version` output of a usable runtime (major >= 20).
+function nodeMajorOk(version) {
+  const match = /^v(\d+)\./.exec(String(version || '').trim());
+  return match ? Number(match[1]) >= 20 : false;
+}
+
+// Scoped cleanup of node cache artifacts: node tree, zip, marker — never the
+// writable npm/electron caches living next to them.
+async function removeNodeArtifacts(cache) {
+  try {
+    await fs.rm(path.join(cache, 'node'), { recursive: true, force: true });
+    await fs.rm(path.join(cache, 'node.zip'), { force: true });
+    await fs.rm(path.join(cache, '.node-version'), { force: true });
+  } catch {}
+}
+
 // Tail helper for session:log (host reads the mapped session.log).
 function tailText(text, maxBytes = 65536) {
   const value = String(text || '');
@@ -498,9 +514,11 @@ module.exports = {
   newSession,
   nodeCacheDir,
   nodeCacheWritableDir,
+  nodeMajorOk,
   normalizeSessionInput,
   parsePackageJson,
   readFileTail,
+  removeNodeArtifacts,
   sanitizeLaunchCommand,
   sdkCacheDir,
   sessionDir,
