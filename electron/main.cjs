@@ -728,6 +728,24 @@ async function runDotnetListSdks(dotnetExe) {
   }
 }
 
+async function runNodeVersion(nodeExe) {
+  try {
+    const { stdout } = await execFileAsync(nodeExe, ['--version'], {
+      windowsHide: true,
+      encoding: 'utf8',
+      timeout: 60000,
+    });
+    return String(stdout || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+function nodeMajorOk(version) {
+  const match = /^v(\d+)\./.exec(String(version || '').trim());
+  return match ? Number(match[1]) >= 20 : false;
+}
+
 // Host SDK cache for sessions (phase 2): reuse beats a 300MB download per run.
 // Priority: existing version-pinned cache → machine-wide install (mapped,
 // never copied) → one-time verified download. In-flight calls share one
@@ -742,6 +760,76 @@ function sdkVersionMarker(cache) {
 async function ensureHostSdk() {
   if (!sdkEnsurePromise) sdkEnsurePromise = doEnsureHostSdk().finally(() => { sdkEnsurePromise = null; });
   return sdkEnsurePromise;
+}
+
+let nodeEnsurePromise = null;
+
+// Host Node cache for node sessions. Priority: machine-wide install
+// (mapped, never copied) → verified one-time download. Writable npm and
+// electron caches live under the same root. Returns
+// { nodeDir, writableDir } to map, or null (provision self-installs).
+async function ensureHostNode() {
+  if (!nodeEnsurePromise) nodeEnsurePromise = doEnsureHostNode().finally(() => { nodeEnsurePromise = null; });
+  return nodeEnsurePromise;
+}
+
+async function doEnsureHostNode() {
+  const cache = commitSessions.nodeCacheDir(app.getPath('userData'));
+  const writable = commitSessions.nodeCacheWritableDir(app.getPath('userData'));
+  try {
+    await fs.mkdir(path.join(writable, 'npm-cache'), { recursive: true });
+    await fs.mkdir(path.join(writable, 'electron-cache'), { recursive: true });
+  } catch {}
+  const machineDir = 'C:\\Program Files\\nodejs';
+  if (nodeMajorOk(await runNodeVersion(path.join(machineDir, 'node.exe')))) {
+    return { nodeDir: machineDir, writableDir: writable };
+  }
+  // Scoped cleanup: node artifacts only, never the writable npm/electron caches.
+  const removeNodeArtifacts = async () => {
+    try {
+      await fs.rm(path.join(cache, 'node'), { recursive: true, force: true });
+      await fs.rm(path.join(cache, 'node.zip'), { force: true });
+      await fs.rm(path.join(cache, '.node-version'), { force: true });
+    } catch {}
+  };
+  try {
+    const marker = await fs.readFile(path.join(cache, '.node-version'), 'utf8');
+    if (marker.trim() === commitSessions.PINNED_NODE) {
+      const exe = path.join(cache, 'node', `node-v${commitSessions.PINNED_NODE}-win-x64`, 'node.exe');
+      if (nodeMajorOk(await runNodeVersion(exe))) return { nodeDir: path.dirname(exe), writableDir: writable };
+    }
+    await removeNodeArtifacts();
+  } catch {}
+  try {
+    await fs.mkdir(cache, { recursive: true });
+    const zipPath = path.join(cache, 'node.zip');
+    const response = await fetch(commitSessions.NODE_URL, { signal: AbortSignal.timeout(10 * 60 * 1000) });
+    if (!response.ok) throw new Error(`status ${response.status}`);
+    await streamResponseToFile(response, zipPath, 'Node превышает лимит 512 МБ');
+    if (!(await commitSessions.verifyFileSha256(zipPath, commitSessions.NODE_SHA256))) {
+      throw new Error('SHA256 mismatch');
+    }
+    const staging = `${cache}.tmp.${process.pid}`;
+    await fs.rm(staging, { recursive: true, force: true });
+    await execFileAsync('powershell.exe', ['-NoProfile', '-Command',
+      `Expand-Archive -LiteralPath ${psQuote(zipPath)} -DestinationPath ${psQuote(staging)} -Force`], { windowsHide: true, timeout: 10 * 60 * 1000 });
+    await removeNodeArtifacts();
+    await fs.mkdir(path.join(cache, 'node'), { recursive: true });
+    await fs.rename(
+      path.join(staging, `node-v${commitSessions.PINNED_NODE}-win-x64`),
+      path.join(cache, 'node', `node-v${commitSessions.PINNED_NODE}-win-x64`),
+    );
+    await fs.rm(staging, { recursive: true, force: true });
+    await fs.writeFile(path.join(cache, '.node-version'), commitSessions.PINNED_NODE, { encoding: 'utf8' });
+    const exe = path.join(cache, 'node', `node-v${commitSessions.PINNED_NODE}-win-x64`, 'node.exe');
+    if (nodeMajorOk(await runNodeVersion(exe))) return { nodeDir: path.dirname(exe), writableDir: writable };
+    throw new Error('Node check failed after install');
+  } catch (error) {
+    console.error('[sessions] node cache failed:', error instanceof Error ? error.message : error);
+    await removeNodeArtifacts();
+    await fs.rm(`${cache}.tmp.${process.pid}`, { recursive: true, force: true });
+    return null;
+  }
 }
 
 function psQuote(value) {
@@ -2012,17 +2100,27 @@ ipcMain.handle('session:start', result(async (_event, input) => {
       const response = await fetch(url, { headers, signal: AbortSignal.timeout(ARCHIVE_FETCH_TIMEOUT_MS) });
       if (!response.ok) throw new Error(`Не удалось скачать архив коммита (status ${response.status})`);
       await streamResponseToFile(response, path.join(dir, 'repo.zip'), 'Архив превышает лимит 512 МБ');
-      const provision = options.launchCommand != null
+      const provision = options.runtime === 'node'
         ? commitSessions.buildProvisionScript({ launchCommand: options.launchCommand, packageDir: options.packageDir, buildFirst: options.buildFirst })
         : commitSessions.buildProvisionScript({ launchFile: options.launchFile });
       await fs.writeFile(path.join(dir, 'provision.cmd'), provision, { encoding: 'utf8' });
       let logonCommand = 'cmd.exe /c C:\\gitora\\provision.cmd';
       const extraFolders = [];
-      const sdkDir = await ensureHostSdk();
-      if (sdkDir) {
-        await fs.writeFile(path.join(dir, 'wrapper.cmd'), commitSessions.buildSdkWrapper(), { encoding: 'utf8' });
-        extraFolders.push({ hostFolder: sdkDir, sandboxFolder: 'C:\\sdkcache', readOnly: true });
-        logonCommand = 'cmd.exe /c C:\\gitora\\wrapper.cmd';
+      if (options.runtime === 'node') {
+        const nodeEnv = await ensureHostNode();
+        if (nodeEnv) {
+          await fs.writeFile(path.join(dir, 'wrapper.cmd'), commitSessions.buildNodeWrapper(), { encoding: 'utf8' });
+          extraFolders.push({ hostFolder: nodeEnv.nodeDir, sandboxFolder: 'C:\\nodecache\\node', readOnly: true });
+          extraFolders.push({ hostFolder: nodeEnv.writableDir, sandboxFolder: 'C:\\nodecache\\writable', readOnly: false });
+          logonCommand = 'cmd.exe /c C:\\gitora\\wrapper.cmd';
+        }
+      } else {
+        const sdkDir = await ensureHostSdk();
+        if (sdkDir) {
+          await fs.writeFile(path.join(dir, 'wrapper.cmd'), commitSessions.buildSdkWrapper(), { encoding: 'utf8' });
+          extraFolders.push({ hostFolder: sdkDir, sandboxFolder: 'C:\\sdkcache', readOnly: true });
+          logonCommand = 'cmd.exe /c C:\\gitora\\wrapper.cmd';
+        }
       }
       const wsbPath = path.join(dir, 'session.wsb');
       await fs.writeFile(wsbPath, commitSessions.buildWsb({

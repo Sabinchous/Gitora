@@ -22,8 +22,10 @@ const PINNED_DOTNET_SDK = '10.0.400';
 const DOTNET_SDK_URL = `https://builds.dotnet.microsoft.com/dotnet/Sdk/${PINNED_DOTNET_SDK}/dotnet-sdk-${PINNED_DOTNET_SDK}-win-x64.zip`;
 const DOTNET_SDK_SHA512 = '9b8b88590e4da131bfd0da7aa089d0fc04d5418d5f8607ec13d55dc5a17b4399afd54d496c12657fa05c6c6546dc5eab930f26ac6c50f2d3a7712c0fb378c366';
 // Pinned portable Node for the node runtime (LTS Jod, verified).
+// SHA256 from https://nodejs.org/dist/v22.23.2/SHASUMS256.txt.
 const PINNED_NODE = '22.23.2';
 const NODE_URL = `https://nodejs.org/dist/v${PINNED_NODE}/node-v${PINNED_NODE}-win-x64.zip`;
+const NODE_SHA256 = '1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97';
 const DEFAULT_MAX_AGE_MINUTES = 240;
 const DEFAULT_MEMORY_MB = 4096;
 
@@ -206,7 +208,13 @@ function normalizeSessionInput(input) {
   let launchCommand = null;
   let packageDir = '';
   let buildFirst = false;
-  if (data.launchCommand !== undefined) {
+  const runtime = data.runtime === 'node' || data.runtime === 'dotnet'
+    ? data.runtime
+    : (data.launchCommand !== undefined ? 'node' : 'dotnet');
+  if (data.runtime !== undefined && data.runtime !== runtime) {
+    throw new Error('Некорректный рантайм');
+  }
+  if (runtime === 'node') {
     launchCommand = sanitizeLaunchCommand(data.launchCommand);
     packageDir = String(data.packageDir == null ? '' : data.packageDir).replace(/\\/g, '/').replace(/(^\/+|\/+$)/g, '');
     if (packageDir && (packageDir.includes('..') || !LAUNCH_FILE_PATTERN.test(packageDir))) {
@@ -230,11 +238,36 @@ function normalizeSessionInput(input) {
   if (!Number.isInteger(maxAgeMinutes) || maxAgeMinutes < 5 || maxAgeMinutes > 1440) {
     throw new Error('Некорректный лимит времени сессии (5–1440 минут)');
   }
-  return { owner, repo, sha, launchFile, launchCommand, packageDir, buildFirst, memoryMb, networking: data.networking === undefined ? true : data.networking === true, maxAgeMinutes };
+  return { owner, repo, sha, runtime, launchFile, launchCommand, packageDir, buildFirst, memoryMb, networking: data.networking === undefined ? true : data.networking === true, maxAgeMinutes };
 }
 
 function sdkCacheDir(userDataDir) {
   return path.join(userDataDir, 'gitora-sdkcache');
+}
+
+// Node cache layout (all under one host dir):
+//   node/         - portable Node (pinned version dir) or empty
+//   writable/     - npm-cache/ + electron-cache/ (npm/electron write here)
+function nodeCacheDir(userDataDir) {
+  return path.join(userDataDir, 'gitora-nodecache');
+}
+
+function nodeCacheWritableDir(userDataDir) {
+  return path.join(nodeCacheDir(userDataDir), 'writable');
+}
+
+// Wrapper run as LogonCommand for node sessions: points npm/electron caches
+// at the mapped writable dir, pre-seeds PATH, then runs provision.
+// NOTE: the electron npm package reads `electron_config_cache`
+// (NOT `ELECTRON_CACHE`) for its binary cache.
+function buildNodeWrapper() {
+  return '@echo off\r\n'
+    + 'set "NPM_CONFIG_CACHE=C:\\nodecache\\writable\\npm-cache"\r\n'
+    + 'set "electron_config_cache=C:\\nodecache\\writable\\electron-cache"\r\n'
+    + 'set "PATH=C:\\nodecache\\node;%PATH%"\r\n'
+    + 'set DOTNET_CLI_TELEMETRY_OPTOUT=1\r\n'
+    + 'set DOTNET_NOLOGO=1\r\n'
+    + 'call C:\\gitora\\provision.cmd\r\n';
 }
 
 // Parses `dotnet --list-sdks` output; true when a 10.x SDK is present
@@ -288,6 +321,24 @@ async function verifyFileSha512(filePath, expectedHex) {
   return actual.toLowerCase() === String(expectedHex || '').toLowerCase();
 }
 
+async function sha256OfFile(filePath) {
+  const hash = crypto.createHash('sha256');
+  const stream = nodeFs.createReadStream(filePath);
+  try {
+    for await (const chunk of stream) hash.update(chunk);
+  } finally {
+    stream.destroy();
+  }
+  return hash.digest('hex');
+}
+
+async function verifyFileSha256(filePath, expectedHex) {
+  const expected = String(expectedHex || '').toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(expected)) return false;
+  const actual = await sha256OfFile(filePath);
+  return actual.toLowerCase() === expected;
+}
+
 // Provisioning script run once at VM logon. Two profiles:
 // - dotnet (launchFile): installs .NET SDK when missing (no winget in
 //   Sandbox images), builds the launch file, runs it. Solutions (.sln/.slnx)
@@ -317,6 +368,11 @@ function buildProvisionScript({ launchFile, launchCommand, packageDir = '', buil
       + 'if not errorlevel 1 goto :have_node\r\n'
       + 'echo [%TIME%] installing Node >> C:\\gitora\\session.log\r\n'
       + `powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest ${NODE_URL} -OutFile C:\\gitora\\node.zip" >> C:\\gitora\\session.log 2>&1\r\n`
+      + `certutil -hashfile C:\\gitora\\node.zip SHA256 | findstr /C:"${NODE_SHA256}" >nul\r\n`
+      + 'if %ERRORLEVEL% NEQ 0 (\r\n'
+      + '  echo [%TIME%] node archive hash mismatch >> C:\\gitora\\session.log\r\n'
+      + '  exit /b 1\r\n'
+      + ')\r\n'
       + `powershell -NoProfile -Command "Expand-Archive -LiteralPath 'C:\\gitora\\node.zip' -DestinationPath 'C:\\gitora\\node' -Force" >> C:\\gitora\\session.log 2>&1\r\n`
       + `set "PATH=C:\\gitora\\node\\node-v${PINNED_NODE}-win-x64;%PATH%"\r\n`
       + ':have_node\r\n'
@@ -328,7 +384,11 @@ function buildProvisionScript({ launchFile, launchCommand, packageDir = '', buil
       + 'C:\\gitora\\vc_redist.x64.exe /install /quiet /norestart >> C:\\gitora\\session.log 2>&1\r\n'
       + `echo "[%TIME%] npm install ${pkgSub || '.'}" >> C:\\gitora\\session.log\r\n`
       + `cd /d "${pkgWin}"\r\n`
-      + 'call npm install >> C:\\gitora\\session.log 2>&1\r\n'
+      + 'if exist package-lock.json (\r\n'
+      + '  call npm ci --no-audit --no-fund >> C:\\gitora\\session.log 2>&1\r\n'
+      + ') else (\r\n'
+      + '  call npm install --no-audit --no-fund >> C:\\gitora\\session.log 2>&1\r\n'
+      + ')\r\n'
       + 'if %ERRORLEVEL% NEQ 0 (\r\n'
       + '  echo [%TIME%] npm install failed >> C:\\gitora\\session.log\r\n'
       + '  exit /b 1\r\n'
@@ -342,7 +402,9 @@ function buildProvisionScript({ launchFile, launchCommand, packageDir = '', buil
           + ')\r\n'
         : '')
       + `echo "[%TIME%] starting ${command}" >> C:\\gitora\\session.log\r\n`
-      + `start "gitora-app" cmd /c "cd /d \\"${pkgWin}\\" && ${command}"\r\n`
+      // No nested quotes: batch has no \" escape, so launch via /D working
+      // dir and redirect inside the child. sanitizeLaunchCommand bans `"`.
+      + `start "gitora-app" /D "${pkgWin}" cmd /c "${command} > C:\\gitora\\apprun.log 2>&1"\r\n`
       + 'echo [%TIME%] exit %ERRORLEVEL% >> C:\\gitora\\session.log\r\n';
   }
   const file = validateLaunchFile(launchFile);
@@ -417,12 +479,14 @@ module.exports = {
   DEFAULT_MEMORY_MB,
   DOTNET_SDK_SHA512,
   DOTNET_SDK_URL,
+  NODE_SHA256,
   NODE_URL,
   PINNED_DOTNET_SDK,
   PINNED_NODE,
   RUNNABLE_EXTENSIONS,
   SESSION_STATES,
   buildProvisionScript,
+  buildNodeWrapper,
   buildSdkWrapper,
   buildWsb,
   detectLaunchFile,
@@ -432,6 +496,8 @@ module.exports = {
   isAlive,
   isRunnableLaunchFile,
   newSession,
+  nodeCacheDir,
+  nodeCacheWritableDir,
   normalizeSessionInput,
   parsePackageJson,
   readFileTail,
@@ -439,8 +505,10 @@ module.exports = {
   sdkCacheDir,
   sessionDir,
   sessionsRoot,
+  sha256OfFile,
   sha512OfFile,
   tailText,
   validateLaunchFile,
+  verifyFileSha256,
   verifyFileSha512,
 };

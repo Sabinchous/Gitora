@@ -6,6 +6,7 @@ import path from 'node:path';
 
 const require = createRequire(import.meta.url);
 const {
+  buildNodeWrapper,
   buildProvisionScript,
   buildSdkWrapper,
   buildWsb,
@@ -14,15 +15,19 @@ const {
   hasDotnet10,
   isAlive,
   newSession,
+  nodeCacheDir,
+  nodeCacheWritableDir,
   normalizeSessionInput,
   parsePackageJson,
   readFileTail,
   sanitizeLaunchCommand,
   sdkCacheDir,
   sessionDir,
+  sha256OfFile,
   sha512OfFile,
   tailText,
   validateLaunchFile,
+  verifyFileSha256,
   verifyFileSha512,
 } = require('./commitSessions.cjs');
 
@@ -152,6 +157,12 @@ describe('tail and hash file helpers', () => {
       );
       expect(await verifyFileSha512(bin, 'DDAF35A193617ABACC417349AE20413112E6FA4E89A97EA20A9EEEE64B55D39A2192992A274FC1A836BA3C23A3FEEBBD454D4423643CE80E2A9AC94FA54CA49F')).toBe(true);
       expect(await verifyFileSha512(bin, '0'.repeat(128))).toBe(false);
+      expect(await sha256OfFile(bin)).toBe(
+        'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+      );
+      expect(await verifyFileSha256(bin, 'BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD')).toBe(true);
+      expect(await verifyFileSha256(bin, '0'.repeat(64))).toBe(false);
+      expect(await verifyFileSha256(bin, 'xyz')).toBe(false);
     } finally {
       await fs.rm(dir, { recursive: true, force: true });
     }
@@ -228,13 +239,36 @@ describe('runtime auto-detection', () => {
     const script = buildProvisionScript({ launchCommand: 'npx electron .', packageDir: '', buildFirst: true });
     expect(script).toContain('where node');
     expect(script).toContain('node-v');
-    expect(script).toContain('call npm install');
-    expect(script).toContain('npm install failed');
+    expect(script).toContain('npm ci --no-audit --no-fund');
     expect(script).toContain('call npm run build');
-    expect(script).toContain('vc_redist.x64.exe');
     expect(script).toContain('npx electron .');
+    expect(script).toContain('apprun.log');
+    expect(script).not.toContain('cd /d \\"');
+    expect(script).toContain('/D "%SRCDIR%"');
+    expect(script).toContain('vc_redist.x64.exe');
+    expect(script).toContain('npm install failed');
     expect(script).not.toContain('dotnet');
     expect(() => buildProvisionScript({})).toThrow();
     expect(() => buildProvisionScript({ launchCommand: 'a && b' })).toThrow();
+  });
+
+  it('routes runtimes in normalizeSessionInput', () => {
+    const base = { owner: 'a', repo: 'b', sha: 'c'.repeat(40) };
+    expect(normalizeSessionInput({ ...base, launchFile: 'a.csproj' }).runtime).toBe('dotnet');
+    expect(normalizeSessionInput({ ...base, launchCommand: 'npm start' }).runtime).toBe('node');
+    expect(normalizeSessionInput({ ...base, runtime: 'node', launchCommand: 'npm start' }).runtime).toBe('node');
+    expect(() => normalizeSessionInput({ ...base, runtime: 'node' })).toThrow();
+    expect(() => normalizeSessionInput({ ...base, runtime: 'python', launchCommand: 'x' })).toThrow();
+    expect(() => normalizeSessionInput({ ...base, launchCommand: 'npm start', packageDir: '../evil' })).toThrow();
+  });
+
+  it('exposes node cache paths and wrapper', () => {
+    expect(nodeCacheDir('C:\\u')).toBe('C:\\u\\gitora-nodecache');
+    expect(nodeCacheWritableDir('C:\\u')).toBe('C:\\u\\gitora-nodecache\\writable');
+    const wrapper = buildNodeWrapper();
+    expect(wrapper).toContain('NPM_CONFIG_CACHE=C:\\nodecache\\writable\\npm-cache');
+    expect(wrapper).toContain('electron_config_cache=C:\\nodecache\\writable\\electron-cache');
+    expect(wrapper).toContain('set "PATH=C:\\nodecache\\node;%PATH%"');
+    expect(wrapper).toContain('call C:\\gitora\\provision.cmd');
   });
 });

@@ -121,6 +121,7 @@ export interface SessionStartInput {
   owner: string;
   repo: string;
   sha: string;
+  runtime?: 'node' | 'dotnet';
   launchFile?: string | null;
   launchCommand?: string;
   packageDir?: string;
