@@ -2099,13 +2099,17 @@ ipcMain.handle('session:start', result(async (_event, input) => {
       const response = await fetch(url, { headers, signal: AbortSignal.timeout(ARCHIVE_FETCH_TIMEOUT_MS) });
       if (!response.ok) throw new Error(`Не удалось скачать архив коммита (status ${response.status})`);
       await streamResponseToFile(response, path.join(dir, 'repo.zip'), 'Архив превышает лимит 512 МБ');
-      const provision = options.runtime === 'node'
-        ? commitSessions.buildProvisionScript({ launchCommand: options.launchCommand, packageDir: options.packageDir, buildFirst: options.buildFirst })
-        : commitSessions.buildProvisionScript({ launchFile: options.launchFile });
+      const provision = options.runtime === 'python'
+        ? commitSessions.buildProvisionScript({ runtime: 'python', launchCommand: options.launchCommand, packageDir: options.packageDir })
+        : options.runtime === 'node'
+          ? commitSessions.buildProvisionScript({ launchCommand: options.launchCommand, packageDir: options.packageDir, buildFirst: options.buildFirst })
+          : commitSessions.buildProvisionScript({ launchFile: options.launchFile });
       await fs.writeFile(path.join(dir, 'provision.cmd'), provision, { encoding: 'utf8' });
       let logonCommand = 'cmd.exe /c C:\\gitora\\provision.cmd';
       const extraFolders = [];
-      if (options.runtime === 'node') {
+      if (options.runtime === 'python') {
+        // No host cache yet: provision self-installs CPython (see phase-4 note).
+      } else if (options.runtime === 'node') {
         const nodeEnv = await ensureHostNode();
         if (nodeEnv) {
           await fs.writeFile(path.join(dir, 'wrapper.cmd'), commitSessions.buildNodeWrapper(), { encoding: 'utf8' });

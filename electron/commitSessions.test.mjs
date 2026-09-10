@@ -220,6 +220,26 @@ describe('runtime auto-detection', () => {
     expect(detectRuntime(['r-1/README.md'], null)).toEqual({ kind: 'unknown' });
   });
 
+  it('detects python repos and builds a python provision profile', () => {
+    const files = ['pyapp-123/requirements.txt', 'pyapp-123/app.py', 'pyapp-123/README.md'];
+    const found = detectRuntime(files, null);
+    expect(found).toMatchObject({ kind: 'python', packageDir: '', entry: 'app.py', command: 'python app.py' });
+    const nested = detectRuntime(
+      ['pyapp-1/backend/pyproject.toml', 'pyapp-1/backend/api/main.py', 'pyapp-1/app.py'],
+      null,
+    );
+    expect(nested).toMatchObject({ kind: 'python', packageDir: 'backend', entry: 'api/main.py' });
+    expect(nested.command).toBe('python api/main.py');
+    const nomanifest = detectRuntime(['pyapp-1/app.py'], null);
+    expect(nomanifest).toEqual({ kind: 'unknown' });
+    const script = buildProvisionScript({ runtime: 'python', launchCommand: 'python app.py', packageDir: '' });
+    expect(script).toContain('python-3.13.9-amd64.exe');
+    expect(script).toContain('call python -m pip install -r requirements.txt');
+    expect(script).toContain('python app.py');
+    expect(script).toContain('apprun.log');
+    expect(script).not.toContain('\\"');
+  });
+
   it('parses package.json safely', () => {
     expect(parsePackageJson('{{{')).toBeNull();
     expect(parsePackageJson('[]')).toBeNull();
@@ -259,8 +279,9 @@ describe('runtime auto-detection', () => {
     expect(normalizeSessionInput({ ...base, launchFile: 'a.csproj' }).runtime).toBe('dotnet');
     expect(normalizeSessionInput({ ...base, launchCommand: 'npm start' }).runtime).toBe('node');
     expect(normalizeSessionInput({ ...base, runtime: 'node', launchCommand: 'npm start' }).runtime).toBe('node');
+    expect(normalizeSessionInput({ ...base, runtime: 'python', launchCommand: 'python app.py' }).runtime).toBe('python');
     expect(() => normalizeSessionInput({ ...base, runtime: 'node' })).toThrow();
-    expect(() => normalizeSessionInput({ ...base, runtime: 'python', launchCommand: 'x' })).toThrow();
+    expect(() => normalizeSessionInput({ ...base, runtime: 'python' })).toThrow();
     expect(() => normalizeSessionInput({ ...base, launchCommand: 'npm start', packageDir: '../evil' })).toThrow();
   });
 

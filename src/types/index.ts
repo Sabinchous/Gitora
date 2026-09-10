@@ -121,7 +121,7 @@ export interface SessionStartInput {
   owner: string;
   repo: string;
   sha: string;
-  runtime?: 'node' | 'dotnet';
+  runtime?: 'node' | 'dotnet' | 'python';
   launchFile?: string | null;
   launchCommand?: string;
   packageDir?: string;
@@ -131,7 +131,7 @@ export interface SessionStartInput {
   maxAgeMinutes?: number;
 }
 
-export type RuntimeKind = 'dotnet' | 'node' | 'unknown';
+export type RuntimeKind = 'dotnet' | 'node' | 'python' | 'unknown';
 
 export interface RuntimeDetection {
   kind: RuntimeKind;
@@ -142,6 +142,8 @@ export interface RuntimeDetection {
   buildFirst?: boolean;
   command?: string | null;
   launchFile?: string;
+  entry?: string | null;
+  manifest?: string;
 }
 
 export interface SessionDetectInput {

@@ -26,6 +26,11 @@ const DOTNET_SDK_SHA512 = '9b8b88590e4da131bfd0da7aa089d0fc04d5418d5f8607ec13d55
 const PINNED_NODE = '22.23.2';
 const NODE_URL = `https://nodejs.org/dist/v${PINNED_NODE}/node-v${PINNED_NODE}-win-x64.zip`;
 const NODE_SHA256 = '1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97';
+// Pinned CPython for the python runtime (official installer, silent mode).
+const PINNED_PYTHON = '3.13.9';
+const PYTHON_URL = `https://www.python.org/ftp/python/${PINNED_PYTHON}/python-${PINNED_PYTHON}-amd64.exe`;
+const PYTHON_ENTRY_CANDIDATES = ['app.py', 'main.py', 'manage.py', 'run.py', 'wsgi.py', '__main__.py'];
+const PYTHON_MANIFESTS = ['requirements.txt', 'pyproject.toml', 'setup.py', 'setup.cfg', 'Pipfile'];
 const DEFAULT_MAX_AGE_MINUTES = 240;
 const DEFAULT_MEMORY_MB = 4096;
 
@@ -65,9 +70,10 @@ function detectLaunchFile(files) {
 }
 
 // --- Runtime auto-detection ------------------------------------------------
-// Detects how to build & run a commit: dotnet (.csproj/.sln) or node
-// (package.json). Returns { kind, ... } where kind is one of
-// 'dotnet' | 'node' | 'unknown'.
+// Detects how to build & run a commit: dotnet (.csproj/.sln), node
+// (package.json) or python (requirements/pyproject + entry script).
+// Returns { kind, ... } where kind is one of
+// 'dotnet' | 'node' | 'python' | 'unknown'.
 
 function parsePackageJson(text) {
   try {
@@ -137,6 +143,31 @@ function detectRuntime(files, packageJsonText) {
   }
   const file = detectLaunchFile(list);
   if (file) return { kind: 'dotnet', launchFile: file };
+  const manifestPaths = list
+    .filter(name => PYTHON_MANIFESTS.some(base => name === base || name.endsWith(`/${base}`)))
+    .sort((a, b) => a.split('/').length - b.split('/').length || a.localeCompare(b));
+  if (manifestPaths[0]) {
+    const dir = manifestPaths[0].includes('/') ? manifestPaths[0].slice(0, manifestPaths[0].lastIndexOf('/')) : '';
+    const prefix = dir ? `${dir}/` : '';
+    const depth = (name) => name.split('/').length;
+    let entry = null;
+    for (const base of PYTHON_ENTRY_CANDIDATES) {
+      const hits = list
+        .filter(name => (dir ? name.startsWith(prefix) : true) && (name === `${prefix}${base}` || name.endsWith(`/${base}`)))
+        .sort((a, b) => depth(a) - depth(b) || a.localeCompare(b));
+      if (hits[0]) {
+        entry = dir ? hits[0].slice(prefix.length) : hits[0];
+        break;
+      }
+    }
+    return {
+      kind: 'python',
+      packageDir: dir,
+      manifest: manifestPaths[0].split('/').pop(),
+      entry,
+      command: entry ? `python ${entry}` : null,
+    };
+  }
   return { kind: 'unknown' };
 }
 
@@ -208,13 +239,16 @@ function normalizeSessionInput(input) {
   let launchCommand = null;
   let packageDir = '';
   let buildFirst = false;
-  const runtime = data.runtime === 'node' || data.runtime === 'dotnet'
+  const explicitRuntime = data.runtime === 'node' || data.runtime === 'dotnet' || data.runtime === 'python'
     ? data.runtime
-    : (data.launchCommand !== undefined ? 'node' : 'dotnet');
-  if (data.runtime !== undefined && data.runtime !== runtime) {
+    : null;
+  if (data.runtime !== undefined && explicitRuntime === null) {
     throw new Error('Некорректный рантайм');
   }
-  if (runtime === 'node') {
+  const runtime = explicitRuntime
+    || (/^python3?\s/i.test(String(data.launchCommand || '')) ? 'python'
+      : (data.launchCommand !== undefined ? 'node' : 'dotnet'));
+  if (runtime === 'node' || runtime === 'python') {
     launchCommand = sanitizeLaunchCommand(data.launchCommand);
     packageDir = String(data.packageDir == null ? '' : data.packageDir).replace(/\\/g, '/').replace(/(^\/+|\/+$)/g, '');
     if (packageDir && (packageDir.includes('..') || !LAUNCH_FILE_PATTERN.test(packageDir))) {
@@ -361,9 +395,9 @@ async function verifyFileSha256(filePath, expectedHex) {
 //   are build-only; runnable projects are built AND run.
 // - node (launchCommand): installs portable Node when missing, `npm install`
 //   (+ `npm run build` when buildFirst), then starts the command detached.
-function buildProvisionScript({ launchFile, launchCommand, packageDir = '', buildFirst = false, dotnetChannel = '10.0' }) {
-  const expandBlock =
-    `powershell -NoProfile -Command "Expand-Archive -LiteralPath 'C:\\gitora\\repo.zip' -DestinationPath 'C:\\gitora\\work' -Force" >> C:\\gitora\\session.log 2>&1\r\n`
+// Shared: unpack the commit archive and resolve %SRCDIR% (single top folder).
+function expandArchiveBlock() {
+  return `powershell -NoProfile -Command "Expand-Archive -LiteralPath 'C:\\gitora\\repo.zip' -DestinationPath 'C:\\gitora\\work' -Force" >> C:\\gitora\\session.log 2>&1\r\n`
     + `powershell -NoProfile -Command "$d=@(Get-ChildItem 'C:\\gitora\\work' -Directory); if ($d.Count -ne 1) { exit 1 }; $d[0].FullName | Out-File 'C:\\gitora\\srcdir.txt' -Encoding ascii" >> C:\\gitora\\session.log 2>&1\r\n`
     + 'if %ERRORLEVEL% NEQ 0 (\r\n'
     + '  echo [%TIME%] bad archive layout, expected one top folder >> C:\\gitora\\session.log\r\n'
@@ -371,6 +405,45 @@ function buildProvisionScript({ launchFile, launchCommand, packageDir = '', buil
     + ')\r\n'
     + 'for /f "delims=" %%D in (C:\\gitora\\srcdir.txt) do set SRCDIR=%%D\r\n'
     + 'if not defined SRCDIR exit /b 1\r\n';
+}
+
+function buildProvisionScript({ runtime, launchFile, launchCommand, packageDir = '', buildFirst = false, dotnetChannel = '10.0' }) {
+  const profile = runtime === 'python' || runtime === 'node' || runtime === 'dotnet'
+    ? runtime
+    : (launchCommand !== undefined ? 'node' : 'dotnet');
+  if (profile === 'python') {
+    const command = sanitizeLaunchCommand(launchCommand);
+    const pkgSub = String(packageDir || '').replace(/\\/g, '/').replace(/(^\/+|\/+$)/g, '');
+    if (pkgSub && (pkgSub.includes('..') || !LAUNCH_FILE_PATTERN.test(pkgSub))) {
+      throw new Error('Некорректная папка пакета');
+    }
+    const pkgWin = pkgSub ? `%SRCDIR%\\${pkgSub.replace(/\//g, '\\')}` : '%SRCDIR%';
+    const [pyMajor, pyMinor] = String(PINNED_PYTHON).split('.');
+    const pyHome = `%LOCALAPPDATA%\\Programs\\Python\\Python${pyMajor}${pyMinor}`;
+    return '@echo off\r\n'
+      + 'echo [%TIME%] logon start >> C:\\gitora\\session.log\r\n'
+      + 'where python >> C:\\gitora\\session.log 2>&1\r\n'
+      + 'if not errorlevel 1 goto :have_python\r\n'
+      + 'echo [%TIME%] installing Python >> C:\\gitora\\session.log\r\n'
+      + `powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest ${PYTHON_URL} -OutFile C:\\gitora\\python-installer.exe" >> C:\\gitora\\session.log 2>&1\r\n`
+      + 'C:\\gitora\\python-installer.exe /quiet InstallAllUsers=0 PrependPath=1 Include_test=0 >> C:\\gitora\\session.log 2>&1\r\n'
+      + `set "PATH=${pyHome};${pyHome}\\Scripts;%PATH%"\r\n`
+      + ':have_python\r\n'
+      + 'python --version >> C:\\gitora\\session.log 2>&1\r\n'
+      + expandArchiveBlock()
+      + `echo "[%TIME%] pip install ${pkgSub || '.'}" >> C:\\gitora\\session.log\r\n`
+      + `cd /d "${pkgWin}"\r\n`
+      + 'if exist requirements.txt (\r\n'
+      + '  call python -m pip install -r requirements.txt >> C:\\gitora\\session.log 2>&1\r\n'
+      + ')\r\n'
+      + 'if %ERRORLEVEL% NEQ 0 (\r\n'
+      + '  echo [%TIME%] pip install failed >> C:\\gitora\\session.log\r\n'
+      + '  exit /b 1\r\n'
+      + ')\r\n'
+      + `echo "[%TIME%] starting ${command}" >> C:\\gitora\\session.log\r\n`
+      + `start "gitora-app" /D "${pkgWin}" cmd /c "${command} > C:\\gitora\\apprun.log 2>&1"\r\n`
+      + 'echo [%TIME%] exit %ERRORLEVEL% >> C:\\gitora\\session.log\r\n';
+  }
   if (launchCommand !== undefined) {
     const command = sanitizeLaunchCommand(launchCommand);
     const pkgSub = String(packageDir || '').replace(/\\/g, '/').replace(/(^\/+|\/+$)/g, '');
@@ -394,7 +467,7 @@ function buildProvisionScript({ launchFile, launchCommand, packageDir = '', buil
       + ':have_node\r\n'
       + 'node --version >> C:\\gitora\\session.log 2>&1\r\n'
       + 'call npm --version >> C:\\gitora\\session.log 2>&1\r\n'
-      + expandBlock
+      + expandArchiveBlock()
       + 'echo [%TIME%] installing VC++ runtime >> C:\\gitora\\session.log\r\n'
       + 'powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest https://aka.ms/vs/17/release/vc_redist.x64.exe -OutFile C:\\gitora\\vc_redist.x64.exe" >> C:\\gitora\\session.log 2>&1\r\n'
       + 'C:\\gitora\\vc_redist.x64.exe /install /quiet /norestart >> C:\\gitora\\session.log 2>&1\r\n'

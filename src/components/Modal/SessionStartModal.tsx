@@ -47,7 +47,7 @@ export const SessionStartModal: React.FC<{ onStarted?: () => void }> = ({ onStar
     : '';
   useEffect(() => {
     if (!detection || !launchTarget) return;
-    if (detection.kind === 'node') {
+    if (detection.kind === 'node' || detection.kind === 'python') {
       setCommand(detection.command || '');
     } else if (detection.kind === 'dotnet' && detection.launchFile) {
       setLaunchFile(prev => prev.trim() ? prev : detection.launchFile as string);
@@ -70,17 +70,19 @@ export const SessionStartModal: React.FC<{ onStarted?: () => void }> = ({ onStar
   const trimmedCommand = command.trim();
   const validMemory = Number.isInteger(memoryMb) && memoryMb >= 1024 && memoryMb <= 32768;
   const validAge = Number.isInteger(maxAgeMinutes) && maxAgeMinutes >= 5 && maxAgeMinutes <= 1440;
-  const isNode = detection?.kind === 'node';
-  const canStart = (isNode ? trimmedCommand.length > 0 : trimmedLaunchFile.length > 0)
+  const isCommandMode = detection?.kind === 'node' || detection?.kind === 'python';
+  const canStart = (isCommandMode ? trimmedCommand.length > 0 : trimmedLaunchFile.length > 0)
     && validMemory && validAge && !busy;
 
   const runtimeLabel = !detection
     ? null
     : detection.kind === 'node'
       ? `Node.js${detection.electron ? ' + Electron' : ''}${detection.packagePath ? ` · ${detection.packagePath}` : ''}`
-      : detection.kind === 'dotnet'
-        ? `.NET · ${detection.launchFile}`
-        : null;
+      : detection.kind === 'python'
+        ? `Python${detection.entry ? ` · ${detection.entry}` : ''}${detection.packageDir ? ` (${detection.packageDir})` : ''}`
+        : detection.kind === 'dotnet'
+          ? `.NET · ${detection.launchFile}`
+          : null;
 
   const close = () => {
     if (!busy) setLaunchTarget(null);
@@ -93,19 +95,19 @@ export const SessionStartModal: React.FC<{ onStarted?: () => void }> = ({ onStar
     setBusy(true);
     setSubmitError(null);
     try {
-      if (!isNode) {
+      if (!isCommandMode) {
         try {
           localStorage.setItem(launchFileStorageKey(launchTarget.owner, launchTarget.repo), trimmedLaunchFile);
         } catch {
           // localStorage недоступен — запуск продолжаем без сохранения префилла.
         }
       }
-      const started = await startSession(isNode
+      const started = await startSession(isCommandMode
         ? {
           owner: launchTarget.owner,
           repo: launchTarget.repo,
           sha: launchTarget.sha,
-          runtime: 'node',
+          runtime: detection?.kind === 'python' ? 'python' : 'node',
           launchCommand: trimmedCommand,
           packageDir: detection?.packageDir,
           buildFirst: detection?.buildFirst,
@@ -168,7 +170,7 @@ export const SessionStartModal: React.FC<{ onStarted?: () => void }> = ({ onStar
           ) : (
             <p className="mb-4 text-xs text-[#7D7482]">Рантайм не распознан — укажите файл или команду вручную</p>
           )}
-          {isNode ? (
+          {isCommandMode ? (
             <label className="block text-xs font-bold">
               Команда запуска
               <input
@@ -195,10 +197,10 @@ export const SessionStartModal: React.FC<{ onStarted?: () => void }> = ({ onStar
             />
           </label>
           )}
-          {!isNode && !trimmedLaunchFile ? (
+          {!isCommandMode && !trimmedLaunchFile ? (
             <p className="mt-2 text-xs text-[#7D7482]">Укажите .csproj для запуска или .sln для сборки</p>
           ) : null}
-          {isNode && !trimmedCommand ? (
+          {isCommandMode && !trimmedCommand ? (
             <p className="mt-2 text-xs text-[#7D7482]">Укажите одну команду без &amp; | &gt; &lt; и подстановок</p>
           ) : null}
 
