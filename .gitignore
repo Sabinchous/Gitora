@@ -9,6 +9,7 @@ outputs/
 release/
 build/*
 !build/icon.png
+!build/icon.ico
 !build/icon.svg
 work/*
 .env

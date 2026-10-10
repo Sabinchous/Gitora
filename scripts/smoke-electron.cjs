@@ -35,6 +35,7 @@ const syncedRepo = {
 let repoListCalls = 0;
 let lastGitPush = null;
 let lastReleaseInput = null;
+let downloadedRelease = null;
 let smokeCollaborators = [
   { login: 'smoke-user', name: 'Smoke User', avatar_url: '', html_url: 'https://github.com/smoke-user', role_name: 'admin', permissions: { pull: true, push: true, admin: true } },
   { login: 'octocat', name: null, avatar_url: '', html_url: 'https://github.com/octocat', role_name: 'push', permissions: { pull: true, push: true } },
@@ -204,9 +205,24 @@ ipcMain.handle('git:commit-folder-changes', async (_event, { push }) => {
   };
 });
 ipcMain.handle('open-external', async () => ({ success: false, error: 'Disabled in smoke test' }));
-ipcMain.handle('app:get-current-version', async () => ({ success: true, data: 'smoke' }));
-ipcMain.handle('app:get-releases', async () => ({ success: true, data: [] }));
-ipcMain.handle('app:download-release', async () => ({ success: false, error: 'Disabled in smoke test' }));
+ipcMain.handle('app:get-current-version', async () => ({ success: true, data: '0.2.2' }));
+ipcMain.handle('app:get-releases', async () => ({ success: true, data: [{
+  tag: 'v0.2.3',
+  name: 'Gitora 0.2.3',
+  body: 'Проверочный релиз',
+  publishedAt: '2026-10-09T00:00:00Z',
+  prerelease: false,
+  assets: [{
+    name: 'Gitora.Setup.0.2.3.exe',
+    size: 1024,
+    downloadUrl: 'https://github.com/Sabinchous/Gitora/releases/download/v0.2.3/Gitora.Setup.0.2.3.exe',
+    downloadCount: 0,
+  }],
+}] }));
+ipcMain.handle('app:download-release', async (_event, input) => {
+  downloadedRelease = input;
+  return { success: true, data: 'C:\\smoke\\Gitora.Setup.0.2.3.exe' };
+});
 ipcMain.handle('app:download-archive', async () => ({ success: false, error: 'Disabled in smoke test' }));
 ipcMain.handle('app:select-upload-folder', async () => ({ success: true, data: { path: 'C:\\smoke', fileCount: 1, totalBytes: 12, warnings: [] } }));
 ipcMain.handle('app:select-release-asset', async () => ({ success: true, data: null }));
@@ -284,6 +300,38 @@ app.whenReady().then(async () => {
 
   try {
     await window.loadFile(path.join(__dirname, '../dist/index.html'));
+    const updatesState = await window.webContents.executeJavaScript(`
+      (async () => {
+        const deadline = Date.now() + 5000;
+        let notice;
+        while (!(notice = document.querySelector('[aria-label="Доступно обновление Gitora"]')) && Date.now() < deadline) {
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+        const noticeVisible = Boolean(notice?.textContent?.includes('0.2.3'));
+        [...(notice?.querySelectorAll('button') || [])]
+          .find(button => button.textContent?.includes('Открыть обновления'))?.click();
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const modal = [...document.querySelectorAll('.modal-panel')]
+          .find(panel => panel.querySelector('h2')?.textContent === 'Обновления');
+        const releaseVisible = Boolean(modal?.textContent?.includes('Текущая версия: 0.2.2')
+          && modal?.textContent?.includes('Gitora 0.2.3')
+          && modal?.textContent?.includes('Gitora.Setup.0.2.3.exe'));
+        [...(modal?.querySelectorAll('button') || [])]
+          .find(button => button.textContent?.trim() === 'Скачать')?.click();
+        modal?.querySelector('button')?.click();
+        await new Promise(resolve => setTimeout(resolve, 200));
+        return { noticeVisible, releaseVisible };
+      })()
+    `);
+    const downloadDeadline = Date.now() + 2000;
+    while (!downloadedRelease && Date.now() < downloadDeadline) {
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    if (!updatesState.noticeVisible || !updatesState.releaseVisible
+      || downloadedRelease?.url !== 'https://github.com/Sabinchous/Gitora/releases/download/v0.2.3/Gitora.Setup.0.2.3.exe'
+      || downloadedRelease?.fileName !== 'Gitora.Setup.0.2.3.exe') {
+      throw new Error(JSON.stringify({ updatesState, downloadedRelease }));
+    }
     const state = await window.webContents.executeJavaScript(`
       (async () => {
         const deadline = Date.now() + 5000;

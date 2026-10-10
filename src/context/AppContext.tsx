@@ -451,7 +451,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [graphLayout, setGraphLayout] = useState<GraphLayoutResult | null>(null);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
   const [releases, setReleases] = useState<Release[]>([]);
-  const [currentVersion, setCurrentVersion] = useState('0.2.2');
+  const [currentVersion, setCurrentVersion] = useState('0.2.3');
   const [connectionFailure, setConnectionFailure] = useState<ConnectionErrorInfo | null>(null);
   const [aiOpen, setAiOpen] = useState(false);
   const [aiStatus, setAiStatus] = useState<AiConnectionStatus>(DEFAULT_AI_STATUS);
@@ -685,7 +685,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         return false;
       }
       await loadSessions();
-      notify('Сессия запущена');
+      notify('Песочница открыта. Подготовка выбранной версии может занять несколько минут.');
       return true;
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Не удалось запустить сессию';

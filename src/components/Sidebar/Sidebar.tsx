@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { Check, ChevronDown, Download, GitBranch, Github, LogOut, Plus, Settings, X } from 'lucide-react';
+import { Check, ChevronDown, Download, Github, LogOut, Plus, Settings, X } from 'lucide-react';
+import appIconUrl from '../../../build/icon.png';
 import { useApp } from '../../context/AppContext';
 import { MoreMenu } from '../common/MoreMenu';
 import { ProjectList } from './ProjectList';
@@ -46,9 +47,7 @@ export const Sidebar: React.FC = () => {
     <aside className={`fixed inset-y-0 left-0 w-60 bg-[#261732] text-[#E7E0D6] flex flex-col z-20 transform transition-transform duration-300 ${mobileOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0`}>
       <div className="h-[70px] flex items-center justify-between px-4">
         <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 grid place-items-center rounded-lg bg-[#AEA989] text-[#261732] -rotate-6">
-            <GitBranch size={18} />
-          </div>
+          <img src={appIconUrl} alt="" width={32} height={32} className="w-8 h-8 aspect-square object-contain flex-none" />
           <span className="text-xl font-extrabold tracking-tight">gitora</span>
         </div>
         <button

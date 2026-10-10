@@ -4,7 +4,7 @@ import type { CommitSessionState } from '../../types';
 
 const SESSION_STATE_LABEL: Record<CommitSessionState, string> = {
   starting: 'Запуск',
-  running: 'Работает',
+  running: 'Песочница открыта',
   stopping: 'Останавливается',
   gone: 'Завершена',
 };
@@ -133,7 +133,7 @@ export const SessionsPanel: React.FC = () => {
                       onClick={() => toggleLog(session.id)}
                       className="rounded-lg border border-[rgba(38,23,50,.12)] px-3 py-1.5 text-xs font-semibold hover:bg-[#F3EFE9]"
                     >
-                      Лог
+                      Ход запуска
                     </button>
                     {logOpen ? (
                       <button
@@ -142,7 +142,7 @@ export const SessionsPanel: React.FC = () => {
                         onClick={() => void loadSessionLog(session.id)}
                         className="rounded-lg border border-[rgba(38,23,50,.12)] px-3 py-1.5 text-xs font-semibold hover:bg-[#F3EFE9] disabled:opacity-40"
                       >
-                        Обновить лог
+                        Обновить
                       </button>
                     ) : null}
                   </div>

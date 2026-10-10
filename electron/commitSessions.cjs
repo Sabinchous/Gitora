@@ -301,11 +301,15 @@ function nodeCacheWritableDir(userDataDir) {
 // at the mapped writable dir, pre-seeds PATH, then runs provision.
 // NOTE: the electron npm package reads `electron_config_cache`
 // (NOT `ELECTRON_CACHE`) for its binary cache.
-function buildNodeWrapper() {
+function buildNodeWrapper({ bundledElectron = false } = {}) {
   return '@echo off\r\n'
     + 'set "NPM_CONFIG_CACHE=C:\\nodecache\\writable\\npm-cache"\r\n'
     + 'set "electron_config_cache=C:\\nodecache\\writable\\electron-cache"\r\n'
     + 'set "PATH=C:\\nodecache\\node;%PATH%"\r\n'
+    + (bundledElectron
+      ? 'set "ELECTRON_OVERRIDE_DIST_PATH=C:\\electroncache"\r\n'
+        + 'set "npm_config_ignore_scripts=true"\r\n'
+      : '')
     + 'set DOTNET_CLI_TELEMETRY_OPTOUT=1\r\n'
     + 'set DOTNET_NOLOGO=1\r\n'
     + 'call C:\\gitora\\provision.cmd\r\n';
@@ -414,7 +418,7 @@ function expandArchiveBlock() {
     + 'if not defined SRCDIR exit /b 1\r\n';
 }
 
-function buildProvisionScript({ runtime, launchFile, launchCommand, packageDir = '', buildFirst = false, dotnetChannel = '10.0' }) {
+function buildProvisionScript({ runtime, launchFile, launchCommand, packageDir = '', buildFirst = false, dotnetChannel = '10.0', bundledElectron = false }) {
   const profile = runtime === 'python' || runtime === 'node' || runtime === 'dotnet'
     ? runtime
     : (launchCommand !== undefined ? inferRuntime(launchCommand) : 'dotnet');
@@ -472,7 +476,7 @@ function buildProvisionScript({ runtime, launchFile, launchCommand, packageDir =
       + ')\r\n'
       + `echo "[%TIME%] starting ${command}" >> C:\\gitora\\session.log\r\n`
       + `start "gitora-app" /D "${pkgWin}" cmd /c "${command} > C:\\gitora\\apprun.log 2>&1"\r\n`
-      + 'echo [%TIME%] exit %ERRORLEVEL% >> C:\\gitora\\session.log\r\n';
+      + 'echo [%TIME%] launch command sent, status %ERRORLEVEL% >> C:\\gitora\\session.log\r\n';
   }
   if (launchCommand !== undefined) {
     const command = sanitizeLaunchCommand(launchCommand);
@@ -498,9 +502,10 @@ function buildProvisionScript({ runtime, launchFile, launchCommand, packageDir =
       + 'node --version >> C:\\gitora\\session.log 2>&1\r\n'
       + 'call npm --version >> C:\\gitora\\session.log 2>&1\r\n'
       + expandArchiveBlock()
-      + 'echo [%TIME%] installing VC++ runtime >> C:\\gitora\\session.log\r\n'
-      + 'powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest https://aka.ms/vs/17/release/vc_redist.x64.exe -OutFile C:\\gitora\\vc_redist.x64.exe" >> C:\\gitora\\session.log 2>&1\r\n'
-      + 'C:\\gitora\\vc_redist.x64.exe /install /quiet /norestart >> C:\\gitora\\session.log 2>&1\r\n'
+      + (bundledElectron ? ''
+        : 'echo [%TIME%] installing VC++ runtime >> C:\\gitora\\session.log\r\n'
+          + 'powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest https://aka.ms/vs/17/release/vc_redist.x64.exe -OutFile C:\\gitora\\vc_redist.x64.exe" >> C:\\gitora\\session.log 2>&1\r\n'
+          + 'C:\\gitora\\vc_redist.x64.exe /install /quiet /norestart >> C:\\gitora\\session.log 2>&1\r\n')
       + `echo "[%TIME%] npm install ${pkgSub || '.'}" >> C:\\gitora\\session.log\r\n`
       + `cd /d "${pkgWin}"\r\n`
       + 'if exist package-lock.json (\r\n'
@@ -512,6 +517,12 @@ function buildProvisionScript({ runtime, launchFile, launchCommand, packageDir =
       + '  echo [%TIME%] npm install failed >> C:\\gitora\\session.log\r\n'
       + '  exit /b 1\r\n'
       + ')\r\n'
+      + (bundledElectron
+        ? 'if exist node_modules\\electron\\index.js (\r\n'
+          + '  node -e "require(\'fs\').writeFileSync(\'node_modules/electron/path.txt\',\'electron.exe\')" >> C:\\gitora\\session.log 2>&1\r\n'
+          + '  if %ERRORLEVEL% NEQ 0 exit /b 1\r\n'
+          + ')\r\n'
+        : '')
       + (buildFirst
         ? 'echo [%TIME%] npm run build >> C:\\gitora\\session.log\r\n'
           + 'call npm run build >> C:\\gitora\\session.log 2>&1\r\n'
@@ -524,7 +535,7 @@ function buildProvisionScript({ runtime, launchFile, launchCommand, packageDir =
       // No nested quotes: batch has no \" escape, so launch via /D working
       // dir and redirect inside the child. sanitizeLaunchCommand bans `"`.
       + `start "gitora-app" /D "${pkgWin}" cmd /c "${command} > C:\\gitora\\apprun.log 2>&1"\r\n`
-      + 'echo [%TIME%] exit %ERRORLEVEL% >> C:\\gitora\\session.log\r\n';
+      + 'echo [%TIME%] launch command sent, status %ERRORLEVEL% >> C:\\gitora\\session.log\r\n';
   }
   const file = validateLaunchFile(launchFile);
   if (!/^[0-9]+\.[0-9]+$/.test(String(dotnetChannel || ''))) throw new Error('Некорректный канал .NET SDK');

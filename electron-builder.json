@@ -1,20 +1,29 @@
 {
   "appId": "com.gitora.app",
   "productName": "Gitora",
-  "artifactName": "Gitora Setup 0.2.2.${ext}",
+  "artifactName": "Gitora.Setup.${version}.${ext}",
   "directories": {
     "output": "outputs/release"
   },
   "files": [
     "dist/**/*",
     "electron/**/*",
+    "build/icon.png",
+    "build/icon.ico",
     "mcp-server.cjs",
     "mcpConnectionManager.cjs",
     "mcpRepository.cjs"
   ],
   "win": {
     "target": "nsis",
-    "icon": "build/icon.png"
+    "icon": "build/icon.ico",
+    "extraResources": [
+      {
+        "from": "node_modules/electron/dist",
+        "to": "electron-runtime",
+        "filter": ["**/*"]
+      }
+    ]
   },
   "mac": {
     "target": "dmg"
@@ -25,6 +34,10 @@
   },
   "nsis": {
     "oneClick": false,
-    "allowToChangeInstallationDirectory": true
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "installerIcon": "build/icon.ico",
+    "uninstallerIcon": "build/icon.ico"
   }
 }

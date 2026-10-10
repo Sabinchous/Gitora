@@ -63,6 +63,10 @@ const REPO_PART = /^[A-Za-z0-9_.-]+$/;
 const TEMPLATE_PART = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/;
 const execFileAsync = promisify(execFile);
 
+if (process.platform === 'win32') {
+  app.setAppUserModelId('com.gitora.app');
+}
+
 let mainWindow;
 let githubToken = null;
 let githubTokenSource = 'none';
@@ -632,8 +636,63 @@ async function sessionDirSizeBytes(dir) {
   return total;
 }
 
+const MIN_SESSION_FREE_BYTES = 4 * 1024 * 1024 * 1024;
+let selectedSessionsRoot = null;
+
 function sessionsRootDir() {
-  return commitSessions.sessionsRoot(app.getPath('temp'));
+  if (selectedSessionsRoot) return selectedSessionsRoot;
+  const tempDir = app.getPath('temp');
+  const freeBytes = (drive) => {
+    try {
+      const stats = nodeFs.statfsSync(drive);
+      return stats.bavail * stats.bsize;
+    } catch {
+      return 0;
+    }
+  };
+  if (freeBytes(tempDir) >= MIN_SESSION_FREE_BYTES) {
+    selectedSessionsRoot = commitSessions.sessionsRoot(tempDir);
+    return selectedSessionsRoot;
+  }
+  // Build output and dependencies live in a mapped host folder. Keep that
+  // folder on a drive with enough space when the system temp drive is full.
+  const tempDrive = path.parse(tempDir).root.toUpperCase();
+  for (let letter = 68; letter <= 90; letter += 1) {
+    const drive = `${String.fromCharCode(letter)}:\\`;
+    if (drive.toUpperCase() === tempDrive || freeBytes(drive) < MIN_SESSION_FREE_BYTES) continue;
+    const root = commitSessions.sessionsRoot(drive);
+    try {
+      nodeFs.mkdirSync(root, { recursive: true });
+      nodeFs.accessSync(root, nodeFs.constants.W_OK);
+      selectedSessionsRoot = root;
+      return selectedSessionsRoot;
+    } catch {}
+  }
+  throw new Error('Недостаточно свободного места для сессии. Освободите не менее 4 ГБ на диске с временными файлами или подключите другой диск.');
+}
+
+async function matchingBundledElectronDir(zipPath, packageDir) {
+  const dist = app.isPackaged
+    ? path.join(process.resourcesPath, 'electron-runtime')
+    : path.join(__dirname, '..', 'node_modules', 'electron', 'dist');
+  let bundledVersion;
+  try {
+    bundledVersion = (await fs.readFile(path.join(dist, 'version'), 'utf8')).trim().replace(/^v/, '');
+    await fs.access(path.join(dist, 'electron.exe'));
+  } catch {
+    return null;
+  }
+  const expectedLock = packageDir ? `${packageDir.replace(/\\/g, '/')}/package-lock.json` : 'package-lock.json';
+  try {
+    const entries = await listZipEntries(zipPath);
+    const entry = entries.find((name) => name.split('/').slice(1).join('/') === expectedLock);
+    if (!entry) return null;
+    const lock = JSON.parse(await readZipEntryText(zipPath, entry, 2 * 1024 * 1024));
+    const requiredVersion = lock?.packages?.['node_modules/electron']?.version;
+    return requiredVersion === bundledVersion ? dist : null;
+  } catch {
+    return null;
+  }
 }
 
 function publicSession(entry) {
@@ -1770,7 +1829,7 @@ function createWindow() {
     minHeight: 560,
     title: 'Gitora',
     autoHideMenuBar: true,
-    icon: path.join(__dirname, '../build/icon.png'),
+    icon: path.join(__dirname, process.platform === 'win32' ? '../build/icon.ico' : '../build/icon.png'),
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -2099,10 +2158,14 @@ ipcMain.handle('session:start', result(async (_event, input) => {
       const response = await fetch(url, { headers, signal: AbortSignal.timeout(ARCHIVE_FETCH_TIMEOUT_MS) });
       if (!response.ok) throw new Error(`Не удалось скачать архив коммита (status ${response.status})`);
       await streamResponseToFile(response, path.join(dir, 'repo.zip'), 'Архив превышает лимит 512 МБ');
+      const nodeEnv = options.runtime === 'node' ? await ensureHostNode() : null;
+      const electronRuntime = nodeEnv
+        ? await matchingBundledElectronDir(path.join(dir, 'repo.zip'), options.packageDir)
+        : null;
       const provision = options.runtime === 'python'
         ? commitSessions.buildProvisionScript({ runtime: 'python', launchCommand: options.launchCommand, packageDir: options.packageDir })
         : options.runtime === 'node'
-          ? commitSessions.buildProvisionScript({ launchCommand: options.launchCommand, packageDir: options.packageDir, buildFirst: options.buildFirst })
+          ? commitSessions.buildProvisionScript({ launchCommand: options.launchCommand, packageDir: options.packageDir, buildFirst: options.buildFirst, bundledElectron: Boolean(electronRuntime) })
           : commitSessions.buildProvisionScript({ launchFile: options.launchFile });
       await fs.writeFile(path.join(dir, 'provision.cmd'), provision, { encoding: 'utf8' });
       let logonCommand = 'cmd.exe /c C:\\gitora\\provision.cmd';
@@ -2110,11 +2173,11 @@ ipcMain.handle('session:start', result(async (_event, input) => {
       if (options.runtime === 'python') {
         // No host cache yet: provision self-installs CPython (see phase-4 note).
       } else if (options.runtime === 'node') {
-        const nodeEnv = await ensureHostNode();
         if (nodeEnv) {
-          await fs.writeFile(path.join(dir, 'wrapper.cmd'), commitSessions.buildNodeWrapper(), { encoding: 'utf8' });
+          await fs.writeFile(path.join(dir, 'wrapper.cmd'), commitSessions.buildNodeWrapper({ bundledElectron: Boolean(electronRuntime) }), { encoding: 'utf8' });
           extraFolders.push({ hostFolder: nodeEnv.nodeDir, sandboxFolder: 'C:\\nodecache\\node', readOnly: true });
           extraFolders.push({ hostFolder: nodeEnv.writableDir, sandboxFolder: 'C:\\nodecache\\writable', readOnly: false });
+          if (electronRuntime) extraFolders.push({ hostFolder: electronRuntime, sandboxFolder: 'C:\\electroncache', readOnly: true });
           logonCommand = 'cmd.exe /c C:\\gitora\\wrapper.cmd';
         }
       } else {

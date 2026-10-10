@@ -57,7 +57,11 @@ function isAllowedGitHubDownloadUrl(rawUrl) {
   try {
     const url = new URL(rawUrl);
     return url.protocol === 'https:'
-      && (url.hostname === 'github.com' || url.hostname === 'objects.githubusercontent.com');
+      && (
+        url.hostname === 'github.com'
+        || url.hostname === 'objects.githubusercontent.com'
+        || url.hostname === 'release-assets.githubusercontent.com'
+      );
   } catch {
     return false;
   }

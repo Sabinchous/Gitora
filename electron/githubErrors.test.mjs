@@ -61,6 +61,7 @@ describe('isAllowedGitHubDownloadUrl', () => {
   it('allows GitHub release URLs and their asset host', () => {
     expect(isAllowedGitHubDownloadUrl('https://github.com/Appappars/Gitora/releases/download/v1.0/Gitora.exe')).toBe(true);
     expect(isAllowedGitHubDownloadUrl('https://objects.githubusercontent.com/github-production-release-asset-2e65be/asset')).toBe(true);
+    expect(isAllowedGitHubDownloadUrl('https://release-assets.githubusercontent.com/github-production-release-asset-2e65be/asset')).toBe(true);
   });
 
   it('rejects non-HTTPS and non-GitHub URLs', () => {

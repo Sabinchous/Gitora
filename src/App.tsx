@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import appIconUrl from '../build/icon.png';
 import {
   BookOpen,
   Box,
@@ -146,9 +147,7 @@ export const App: React.FC = () => {
         {!connected ? (
           <div className="flex-1 flex items-center justify-center p-6">
             <div className="text-center max-w-md">
-              <div className="w-20 h-20 rounded-2xl bg-[#261732] grid place-items-center mx-auto mb-6">
-                <GitBranch size={40} className="text-[#E7E0D6]" />
-              </div>
+              <img src={appIconUrl} alt="" width={80} height={80} className="w-20 h-20 aspect-square object-contain mx-auto mb-6" />
               <h1 className="text-3xl font-bold tracking-tight mb-3">Gitora</h1>
               <p className="text-sm text-[#7D7482] leading-relaxed mb-6">
                 Визуальный граф истории Git-репозиториев. Подключитесь с Personal Access Token, чтобы видеть коммиты, ветки и слияния в одном месте.

@@ -1,7 +1,7 @@
 {
   "name": "gitora",
   "private": true,
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Desktop GitHub history graph",
   "author": "Gitora",
   "type": "module",
