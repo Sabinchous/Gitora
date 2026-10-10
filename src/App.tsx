@@ -16,6 +16,7 @@ import {
   Menu,
   PackagePlus,
   Pencil,
+  Play,
   Plus,
   RefreshCw,
   Users,
@@ -29,6 +30,7 @@ import { PRDetail } from './components/PR/PRDetail';
 import { IssueList } from './components/Issue/IssueList';
 import { IssueDetail } from './components/Issue/IssueDetail';
 import { TeamPanel } from './components/Team/TeamPanel';
+import { SessionsPanel } from './components/Sessions/SessionsPanel';
 import { SearchBar } from './components/Search/SearchBar';
 import { CreateModal } from './components/Modal/CreateModal';
 import { EditModal } from './components/Modal/EditModal';
@@ -40,6 +42,7 @@ import { ReadmeModal } from './components/Modal/ReadmeModal';
 import { ChangesModal } from './components/Modal/ChangesModal';
 import { SettingsModal } from './components/Modal/SettingsModal';
 import { LoginModal } from './components/Modal/LoginModal';
+import { SessionStartModal } from './components/Modal/SessionStartModal';
 import { UpdatesModal } from './components/Modal/UpdatesModal';
 import { ConnectionErrorPanel } from './components/common/ConnectionErrorPanel';
 import { MoreMenu } from './components/common/MoreMenu';
@@ -84,7 +87,7 @@ export const App: React.FC = () => {
     providerLabel,
   } = useApp();
 
-  const [activeTab, setActiveTab] = useState<'graph' | 'pr' | 'issues' | 'team'>('graph');
+  const [activeTab, setActiveTab] = useState<'graph' | 'pr' | 'issues' | 'team' | 'sessions'>('graph');
   const [graphVisible, setGraphVisible] = useState(true);
   const [graphAuthorFocus, setGraphAuthorFocus] = useState('');
   const [branchStartTab, setBranchStartTab] = useState<'list' | 'create'>('list');
@@ -303,6 +306,16 @@ export const App: React.FC = () => {
                     <Users size={14} className="inline mr-1.5" />
                     Team
                   </button>
+                  <button
+                    type="button"
+                    aria-pressed={activeTab === 'sessions'}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold ${activeTab === 'sessions' ? 'bg-[#261732] text-[#E7E0D6]' : 'text-[#7D7482] hover:bg-[#F3EFE9]'}`}
+                    onClick={() => setActiveTab('sessions')}
+                    data-sessions-tab
+                  >
+                    <Play size={14} className="inline mr-1.5" />
+                    Сессии
+                  </button>
                 </div>
                 {activeTab === 'graph' && (
                   <MoreMenu
@@ -360,6 +373,10 @@ export const App: React.FC = () => {
                     </div>
                     <IssueDetail />
                   </>
+                ) : activeTab === 'sessions' ? (
+                  <div className="flex-1 min-w-0 overflow-auto">
+                    <SessionsPanel />
+                  </div>
                 ) : (
                   <TeamPanel
                     onShowCommits={login => {
@@ -376,6 +393,7 @@ export const App: React.FC = () => {
       </main>
 
       {loginOpen && <LoginModal />}
+      <SessionStartModal onStarted={() => setActiveTab('sessions')} />
       {createOpen && <CreateModal />}
       {editOpen && project && (
         <EditModal

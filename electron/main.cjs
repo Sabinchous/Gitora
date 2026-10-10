@@ -1,9 +1,12 @@
 ﻿const { app, BrowserWindow, ipcMain, safeStorage, shell, dialog } = require('electron');
 const { clipboard } = require('electron');
 const fs = require('fs/promises');
+const nodeFs = require('fs');
+const { pipeline } = require('stream/promises');
+const { Transform } = require('stream');
 const path = require('path');
 const crypto = require('crypto');
-const { execFile } = require('child_process');
+const { execFile, spawn } = require('child_process');
 const { promisify } = require('util');
 const ignore = require('ignore');
 const {
@@ -49,6 +52,7 @@ const {
   normalizeGiteaBaseUrl,
 } = require('./gitea.cjs');
 const accountsStore = require('./gitAccounts.cjs');
+const commitSessions = require('./commitSessions.cjs');
 
 const isDev = process.argv.includes('--dev');
 const isMcpServer = process.argv.includes('--mcp-server');
@@ -535,6 +539,384 @@ function snapshotWithUser(user) {
   return { ...user, ...providerInfo(), ...accountsStore.snapshot(gitSession) };
 }
 
+// Lists zip entries on the host without extracting (no traversal risk:
+// names only, capped). PowerShell emits UTF-8 explicitly.
+async function listZipEntries(zipPath, maxEntries = 2000) {
+  const limit = Math.min(Math.max(Number(maxEntries) || 2000, 1), 5000);
+  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-Command',
+    '[Console]::OutputEncoding = [Text.UTF8Encoding]::new(); ' +
+    'Add-Type -AssemblyName System.IO.Compression.FileSystem; ' +
+    `$z = [IO.Compression.ZipFile]::OpenRead(${psQuote(zipPath)}); ` +
+    `$z.Entries.FullName | Select-Object -First ${limit}; $z.Dispose()`],
+  { windowsHide: true, encoding: 'utf8', timeout: 60000 });
+  return String(stdout || '').split('\n').map(line => line.trim()).filter(Boolean);
+}
+
+function isSafeZipEntry(name) {
+  const value = String(name || '').replace(/\\/g, '/');
+  return Boolean(value) && !value.startsWith('/') && !value.includes('..')
+    && /^[A-Za-z0-9._\-/ ]+$/.test(value);
+}
+
+// Reads one small text file from a zip (e.g. package.json for detection).
+async function readZipEntryText(zipPath, entryName, maxBytes = 102400) {
+  if (!isSafeZipEntry(entryName)) throw new Error('Некорректное имя файла в архиве');
+  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-Command',
+    '[Console]::OutputEncoding = [Text.UTF8Encoding]::new(); ' +
+    'Add-Type -AssemblyName System.IO.Compression.FileSystem; ' +
+    `$z = [IO.Compression.ZipFile]::OpenRead(${psQuote(zipPath)}); ` +
+    `$e = $z.Entries | Where-Object { $_.FullName -eq ${psQuote(entryName)} } | Select-Object -First 1; ` +
+    'if (-not $e) { exit 3 }; ' +
+    `$r = New-Object IO.StreamReader($e.Open()); $t = $r.ReadToEnd(); $r.Close(); $z.Dispose(); ` +
+    `if ($t.Length -gt ${maxBytes}) { $t.Substring(0, ${maxBytes}) } else { $t }`],
+  { windowsHide: true, encoding: 'utf8', timeout: 60000 });
+  return String(stdout || '');
+}
+
+// --- Commit sessions (Phase 1) --------------------------------------------
+// In-memory registry; closing the sandbox wipes the VM, the host removes the
+// temp dir on stop/liveness refresh. Tokens never enter the VM: only the
+// downloaded commit archive is mapped in.
+const commitSessionRegistry = new Map();
+// Sync gate: closes the TOCTOU window between the single-sandbox check and
+// registration (two concurrent session:start calls).
+let sessionStarting = false;
+const SANDBOX_EXE = 'C:\\Windows\\System32\\WindowsSandbox.exe';
+const MAX_ARCHIVE_BYTES = 512 * 1024 * 1024;
+const MAX_SESSION_DIR_BYTES = 2 * 1024 * 1024 * 1024;
+const ARCHIVE_FETCH_TIMEOUT_MS = 5 * 60 * 1000;
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Bounded download: Content-Length pre-check + streaming byte counter +
+// timeout. Never buffers the whole archive in memory (OOM guard).
+async function streamResponseToFile(response, dest, limitMessage) {
+  const announced = Number(response.headers.get('content-length'));
+  if (Number.isFinite(announced) && announced > MAX_ARCHIVE_BYTES) throw new Error(limitMessage);
+  let bytes = 0;
+  const counter = new Transform({
+    transform(chunk, _encoding, callback) {
+      bytes += chunk.length;
+      if (bytes > MAX_ARCHIVE_BYTES) callback(new Error(limitMessage));
+      else callback(null, chunk);
+    },
+  });
+  try {
+    await pipeline(response.body, counter, nodeFs.createWriteStream(dest));
+  } catch (error) {
+    await fs.rm(dest, { force: true });
+    throw error;
+  }
+  return bytes;
+}
+
+async function sessionDirSizeBytes(dir) {
+  let total = 0;
+  async function walk(current) {
+    let entries;
+    try {
+      entries = await fs.readdir(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) await walk(full);
+      else {
+        try {
+          total += (await fs.stat(full)).size;
+        } catch {}
+      }
+    }
+  }
+  await walk(dir);
+  return total;
+}
+
+function sessionsRootDir() {
+  return commitSessions.sessionsRoot(app.getPath('temp'));
+}
+
+function publicSession(entry) {
+  return {
+    id: entry.id,
+    owner: entry.owner,
+    repo: entry.repo,
+    sha: entry.sha,
+    launchFile: entry.launchFile,
+    ...(entry.launchCommand ? { launchCommand: entry.launchCommand } : {}),
+    state: entry.state,
+    createdAt: entry.createdAt,
+    ...(entry.expiresAt ? { expiresAt: new Date(entry.expiresAt).toISOString() } : {}),
+  };
+}
+
+async function removeSessionDir(dir) {
+  try {
+    await fs.rm(dir, { recursive: true, force: true });
+  } catch {}
+}
+
+function orphanRecordPath() {
+  return path.join(app.getPath('userData'), 'gitora-sessions.json');
+}
+
+async function recordOrphanSession(entry) {
+  try {
+    await fs.writeFile(orphanRecordPath(), JSON.stringify({
+      id: entry.id, pid: entry.pid, dir: entry.dir, expiresAt: entry.expiresAt || 0,
+    }), { encoding: 'utf8', mode: 0o600 });
+  } catch {}
+}
+
+async function clearOrphanRecord(id) {
+  try {
+    const raw = await fs.readFile(orphanRecordPath(), 'utf8');
+    if (JSON.parse(raw || '{}')?.id === id) await fs.rm(orphanRecordPath(), { force: true });
+  } catch {}
+}
+
+// Reaps a VM orphaned by a main-process restart: the detached sandbox may
+// still run while the registry is gone. Kill + clean, then sweep leftovers.
+async function reapOrphanSessions() {
+  try {
+    const record = JSON.parse(await fs.readFile(orphanRecordPath(), 'utf8') || '{}');
+    if (record && Number.isInteger(record.pid)) {
+      try {
+        await execFileAsync('taskkill.exe', ['/PID', String(record.pid), '/T', '/F'], { windowsHide: true });
+      } catch {}
+    }
+    if (record && record.dir) await fs.rm(record.dir, { recursive: true, force: true });
+  } catch {}
+  try {
+    await fs.rm(orphanRecordPath(), { force: true });
+  } catch {}
+  try {
+    await fs.rm(sessionsRootDir(), { recursive: true, force: true });
+    await fs.mkdir(sessionsRootDir(), { recursive: true });
+  } catch {}
+}
+
+async function expireSession(id) {
+  const entry = commitSessionRegistry.get(id);
+  if (!entry) return;
+  entry.state = 'stopping';
+  await killSessionVm(entry);
+  await removeSessionDir(entry.dir);
+  commitSessionRegistry.delete(id);
+  await clearOrphanRecord(id);
+}
+
+async function killSessionVm(entry) {
+  try {
+    if (commitSessions.isAlive(entry.pid)) {
+      await execFileAsync('taskkill.exe', ['/PID', String(entry.pid), '/T', '/F'], { windowsHide: true });
+    }
+  } catch {}
+}
+
+async function runDotnetListSdks(dotnetExe) {
+  try {
+    const { stdout } = await execFileAsync(dotnetExe, ['--list-sdks'], {
+      windowsHide: true,
+      encoding: 'utf8',
+      timeout: 60000,
+      env: { ...process.env, DOTNET_CLI_TELEMETRY_OPTOUT: '1', DOTNET_NOLOGO: '1' },
+    });
+    return String(stdout || '');
+  } catch {
+    return '';
+  }
+}
+
+async function runNodeVersion(nodeExe) {
+  try {
+    const { stdout } = await execFileAsync(nodeExe, ['--version'], {
+      windowsHide: true,
+      encoding: 'utf8',
+      timeout: 60000,
+    });
+    return String(stdout || '').trim();
+  } catch {
+    return '';
+  }
+}
+
+// Host SDK cache for sessions (phase 2): reuse beats a 300MB download per run.
+// Priority: existing version-pinned cache → machine-wide install (mapped,
+// never copied) → one-time verified download. In-flight calls share one
+// promise (no parallel 300MB fetches). Returns the host dir to map
+// read-only, or ''.
+let sdkEnsurePromise = null;
+
+function sdkVersionMarker(cache) {
+  return path.join(cache, '.sdk-version');
+}
+
+async function ensureHostSdk() {
+  if (!sdkEnsurePromise) sdkEnsurePromise = doEnsureHostSdk().finally(() => { sdkEnsurePromise = null; });
+  return sdkEnsurePromise;
+}
+
+let nodeEnsurePromise = null;
+
+// Host Node cache for node sessions. Priority: machine-wide install
+// (mapped, never copied) → verified one-time download. Writable npm and
+// electron caches live under the same root. Returns
+// { nodeDir, writableDir } to map, or null (provision self-installs).
+async function ensureHostNode() {
+  if (!nodeEnsurePromise) nodeEnsurePromise = doEnsureHostNode().finally(() => { nodeEnsurePromise = null; });
+  return nodeEnsurePromise;
+}
+
+async function doEnsureHostNode() {
+  const cache = commitSessions.nodeCacheDir(app.getPath('userData'));
+  const writable = commitSessions.nodeCacheWritableDir(app.getPath('userData'));
+  try {
+    await fs.mkdir(path.join(writable, 'npm-cache'), { recursive: true });
+    await fs.mkdir(path.join(writable, 'electron-cache'), { recursive: true });
+  } catch {}
+  const machineDir = 'C:\\Program Files\\nodejs';
+  if (commitSessions.nodeMajorOk(await runNodeVersion(path.join(machineDir, 'node.exe')))) {
+    return { nodeDir: machineDir, writableDir: writable };
+  }
+  // Scoped cleanup: node artifacts only, never the writable npm/electron caches.
+  const removeNodeArtifacts = () => commitSessions.removeNodeArtifacts(cache);
+  // Sweep stale staging dirs from other pids (best effort).
+  try {
+    const entries = await fs.readdir(path.dirname(cache), { withFileTypes: true });
+    const prefix = `${path.basename(cache)}.tmp.`;
+    for (const entry of entries) {
+      if (entry.isDirectory() && entry.name.startsWith(prefix)) {
+        await fs.rm(path.join(path.dirname(cache), entry.name), { recursive: true, force: true });
+      }
+    }
+  } catch {}
+  try {
+    const marker = await fs.readFile(path.join(cache, '.node-version'), 'utf8');
+    if (marker.trim() === commitSessions.PINNED_NODE) {
+      const exe = path.join(cache, 'node', `node-v${commitSessions.PINNED_NODE}-win-x64`, 'node.exe');
+      if (commitSessions.nodeMajorOk(await runNodeVersion(exe))) return { nodeDir: path.dirname(exe), writableDir: writable };
+    }
+    await removeNodeArtifacts();
+  } catch {}
+  try {
+    await fs.mkdir(cache, { recursive: true });
+    const zipPath = path.join(cache, 'node.zip');
+    const response = await fetch(commitSessions.NODE_URL, { signal: AbortSignal.timeout(10 * 60 * 1000) });
+    if (!response.ok) throw new Error(`status ${response.status}`);
+    await streamResponseToFile(response, zipPath, 'Node превышает лимит 512 МБ');
+    if (!(await commitSessions.verifyFileSha256(zipPath, commitSessions.NODE_SHA256))) {
+      throw new Error('SHA256 mismatch');
+    }
+    const staging = `${cache}.tmp.${process.pid}`;
+    await fs.rm(staging, { recursive: true, force: true });
+    await execFileAsync('powershell.exe', ['-NoProfile', '-Command',
+      `Expand-Archive -LiteralPath ${psQuote(zipPath)} -DestinationPath ${psQuote(staging)} -Force`], { windowsHide: true, timeout: 10 * 60 * 1000 });
+    await removeNodeArtifacts();
+    await fs.mkdir(path.join(cache, 'node'), { recursive: true });
+    await fs.rename(
+      path.join(staging, `node-v${commitSessions.PINNED_NODE}-win-x64`),
+      path.join(cache, 'node', `node-v${commitSessions.PINNED_NODE}-win-x64`),
+    );
+    await fs.rm(staging, { recursive: true, force: true });
+    await fs.writeFile(path.join(cache, '.node-version'), commitSessions.PINNED_NODE, { encoding: 'utf8' });
+    const exe = path.join(cache, 'node', `node-v${commitSessions.PINNED_NODE}-win-x64`, 'node.exe');
+    if (commitSessions.nodeMajorOk(await runNodeVersion(exe))) return { nodeDir: path.dirname(exe), writableDir: writable };
+    throw new Error('Node check failed after install');
+  } catch (error) {
+    console.error('[sessions] node cache failed:', error instanceof Error ? error.message : error);
+    await removeNodeArtifacts();
+    await fs.rm(`${cache}.tmp.${process.pid}`, { recursive: true, force: true });
+    return null;
+  }
+}
+
+function psQuote(value) {
+  return `'${String(value || '').replace(/'/g, "''")}'`;
+}
+
+async function doEnsureHostSdk() {
+  const cache = commitSessions.sdkCacheDir(app.getPath('userData'));
+  try {
+    const marker = await fs.readFile(sdkVersionMarker(cache), 'utf8');
+    if (marker.trim() === commitSessions.PINNED_DOTNET_SDK) {
+      const list = await runDotnetListSdks(path.join(cache, 'dotnet.exe'));
+      if (commitSessions.hasDotnet10(list)) return cache;
+    }
+    await fs.rm(cache, { recursive: true, force: true });
+  } catch {}
+  const machineDir = 'C:\\Program Files\\dotnet';
+  if (commitSessions.hasDotnet10(await runDotnetListSdks(path.join(machineDir, 'dotnet.exe')))) return machineDir;
+  try {
+    await fs.mkdir(cache, { recursive: true });
+    const zipPath = path.join(cache, 'dotnet-sdk.zip');
+    const response = await fetch(commitSessions.DOTNET_SDK_URL, { signal: AbortSignal.timeout(10 * 60 * 1000) });
+    if (!response.ok) throw new Error(`status ${response.status}`);
+    await streamResponseToFile(response, zipPath, 'SDK превышает лимит 512 МБ');
+    if (!(await commitSessions.verifyFileSha512(zipPath, commitSessions.DOTNET_SDK_SHA512))) {
+      throw new Error('SHA512 mismatch');
+    }
+    const staging = `${cache}.tmp.${process.pid}`;
+    await fs.rm(staging, { recursive: true, force: true });
+    await execFileAsync('powershell.exe', ['-NoProfile', '-Command',
+      `Expand-Archive -LiteralPath ${psQuote(zipPath)} -DestinationPath ${psQuote(staging)} -Force`], { windowsHide: true, timeout: 10 * 60 * 1000 });
+    await fs.rm(cache, { recursive: true, force: true });
+    await fs.rename(staging, cache);
+    await fs.writeFile(sdkVersionMarker(cache), commitSessions.PINNED_DOTNET_SDK, { encoding: 'utf8' });
+    const list = await runDotnetListSdks(path.join(cache, 'dotnet.exe'));
+    if (commitSessions.hasDotnet10(list)) return cache;
+    throw new Error('SDK check failed after install');
+  } catch (error) {
+    console.error('[sessions] sdk cache failed:', error instanceof Error ? error.message : error);
+    await fs.rm(cache, { recursive: true, force: true });
+    return '';
+  }
+}
+
+async function refreshSessionLiveness(entry) {
+  if (entry.state !== 'running' && entry.state !== 'starting') return true;
+  if (!commitSessions.isAlive(entry.pid)) {
+    entry.state = 'gone';
+    void removeSessionDir(entry.dir);
+    commitSessionRegistry.delete(entry.id);
+    return false;
+  }
+  // Auto-stop after the session lifetime expires.
+  if (entry.expiresAt && Date.now() > entry.expiresAt) {
+    entry.state = 'stopping';
+    await killSessionVm(entry);
+    await removeSessionDir(entry.dir);
+    commitSessionRegistry.delete(entry.id);
+    return false;
+  }
+  // Disk-quota guard: build logs/unpacks live on the host-mapped dir.
+  try {
+    if (await sessionDirSizeBytes(entry.dir) > MAX_SESSION_DIR_BYTES) {
+      entry.state = 'stopping';
+      await killSessionVm(entry);
+      await removeSessionDir(entry.dir);
+      commitSessionRegistry.delete(entry.id);
+      return false;
+    }
+  } catch {}
+  return true;
+}
+
+async function liveSessions() {
+  for (const entry of [...commitSessionRegistry.values()]) await refreshSessionLiveness(entry);
+  return [...commitSessionRegistry.values()];
+}
+
+function commitArchiveRequest(owner, repo, sha) {
+  const url = gitProvider === 'gitea'
+    ? `${giteaBaseUrl}/${owner}/${repo}/archive/${sha}.zip`
+    : `${GITHUB_ORIGIN}/${owner}/${repo}/archive/${sha}.zip`;
+  const headers = githubToken
+    ? (gitProvider === 'gitea' ? giteaHeaders(githubToken) : { Authorization: `Bearer ${githubToken}` })
+    : {};
+  return { url, headers };
+}
+
 function githubHeaders(token = githubToken) {
   if (!token) throw new Error('GitHub РЅРµ РїРѕРґРєР»СЋС‡С‘РЅ');
   return {
@@ -702,7 +1084,8 @@ function shouldFetchAllPages(endpoint) {
 }
 
 function validRepo(owner, repo) {
-  return REPO_PART.test(owner) && REPO_PART.test(repo);
+  return REPO_PART.test(owner) && REPO_PART.test(repo)
+    && owner !== '.' && owner !== '..' && repo !== '.' && repo !== '..';
 }
 
 function teamRepositoryEndpoint(owner, repo, suffix = '') {
@@ -1508,6 +1891,8 @@ if (!isMcpServer && !hasSingleInstanceLock) {
   app.whenReady().then(async () => {
     mcpLog('gitora_start', { pid: process.pid, version: app.getVersion() });
     await restoreToken();
+    // Reap VMs orphaned by a previous main-process run, then sweep leftovers.
+    void reapOrphanSessions();
     createWindow();
     // MCP не должен блокировать создание окна и загрузку Gitora.
     void startMcpBridge();
@@ -1655,6 +2040,191 @@ ipcMain.handle('github:remove-account', result(async (_event, id) => {
 }));
 
 ipcMain.handle('provider:get', result(async () => providerInfo()));
+
+// Inspects a commit archive (names only, temp dir cleaned afterwards) and
+// reports how to build & run it: { kind: 'dotnet'|'node'|'unknown', ... }.
+ipcMain.handle('session:detect', result(async (_event, input) => {
+  const owner = typeof input?.owner === 'string' ? input.owner : '';
+  const repo = typeof input?.repo === 'string' ? input.repo : '';
+  const sha = typeof input?.sha === 'string' ? input.sha : '';
+  if (!validRepo(owner, repo)) throw new Error('Некорректное имя репозитория');
+  if (!isValidGitSha(sha)) throw new Error('Некорректный SHA коммита');
+  const tmpRoot = path.join(app.getPath('temp'), `gitora-detect-${crypto.randomUUID()}`);
+  await fs.mkdir(tmpRoot, { recursive: true });
+  try {
+    const { url, headers } = commitArchiveRequest(owner, repo, sha);
+    const response = await fetch(url, { headers, signal: AbortSignal.timeout(ARCHIVE_FETCH_TIMEOUT_MS) });
+    if (!response.ok) throw new Error(`Не удалось скачать архив коммита (status ${response.status})`);
+    const zipPath = path.join(tmpRoot, 'repo.zip');
+    await streamResponseToFile(response, zipPath, 'Архив превышает лимит 512 МБ');
+    const entries = await listZipEntries(zipPath);
+    const withTop = entries.filter(name => name.includes('/'));
+    const shallowestPkg = withTop
+      .map(name => name.replace(/\\/g, '/'))
+      .map(name => ({ raw: name, stripped: name.split('/').slice(1).join('/') }))
+      .filter(item => item.stripped === 'package.json' || item.stripped.endsWith('/package.json'))
+      .sort((a, b) => a.stripped.split('/').length - b.stripped.split('/').length)[0];
+    let packageJsonText = null;
+    if (shallowestPkg) {
+      try {
+        packageJsonText = await readZipEntryText(zipPath, shallowestPkg.raw);
+      } catch {
+        packageJsonText = null;
+      }
+    }
+    return commitSessions.detectRuntime(entries, packageJsonText);
+  } finally {
+    await fs.rm(tmpRoot, { recursive: true, force: true });
+  }
+}));
+
+ipcMain.handle('session:start', result(async (_event, input) => {
+  const options = commitSessions.normalizeSessionInput(input);
+  const { owner, repo, sha } = options;
+  if (sessionStarting || (await liveSessions()).length > 0) {
+    throw new Error('Остановите текущую сессию перед запуском новой (одна песочница за раз)');
+  }
+  sessionStarting = true;
+  try {
+    try {
+      await fs.access(SANDBOX_EXE);
+    } catch {
+      throw new Error('Песочница недоступна: включите Windows Sandbox и перезагрузитесь');
+    }
+    const session = commitSessions.newSession({ owner, repo, sha, launchFile: options.launchFile, launchCommand: options.launchCommand });
+    const dir = commitSessions.sessionDir(sessionsRootDir(), session.id);
+    await fs.mkdir(dir, { recursive: true });
+    try {
+      const { url, headers } = commitArchiveRequest(owner, repo, sha);
+      const response = await fetch(url, { headers, signal: AbortSignal.timeout(ARCHIVE_FETCH_TIMEOUT_MS) });
+      if (!response.ok) throw new Error(`Не удалось скачать архив коммита (status ${response.status})`);
+      await streamResponseToFile(response, path.join(dir, 'repo.zip'), 'Архив превышает лимит 512 МБ');
+      const provision = options.runtime === 'python'
+        ? commitSessions.buildProvisionScript({ runtime: 'python', launchCommand: options.launchCommand, packageDir: options.packageDir })
+        : options.runtime === 'node'
+          ? commitSessions.buildProvisionScript({ launchCommand: options.launchCommand, packageDir: options.packageDir, buildFirst: options.buildFirst })
+          : commitSessions.buildProvisionScript({ launchFile: options.launchFile });
+      await fs.writeFile(path.join(dir, 'provision.cmd'), provision, { encoding: 'utf8' });
+      let logonCommand = 'cmd.exe /c C:\\gitora\\provision.cmd';
+      const extraFolders = [];
+      if (options.runtime === 'python') {
+        // No host cache yet: provision self-installs CPython (see phase-4 note).
+      } else if (options.runtime === 'node') {
+        const nodeEnv = await ensureHostNode();
+        if (nodeEnv) {
+          await fs.writeFile(path.join(dir, 'wrapper.cmd'), commitSessions.buildNodeWrapper(), { encoding: 'utf8' });
+          extraFolders.push({ hostFolder: nodeEnv.nodeDir, sandboxFolder: 'C:\\nodecache\\node', readOnly: true });
+          extraFolders.push({ hostFolder: nodeEnv.writableDir, sandboxFolder: 'C:\\nodecache\\writable', readOnly: false });
+          logonCommand = 'cmd.exe /c C:\\gitora\\wrapper.cmd';
+        }
+      } else {
+        const sdkDir = await ensureHostSdk();
+        if (sdkDir) {
+          await fs.writeFile(path.join(dir, 'wrapper.cmd'), commitSessions.buildSdkWrapper(), { encoding: 'utf8' });
+          extraFolders.push({ hostFolder: sdkDir, sandboxFolder: 'C:\\sdkcache', readOnly: true });
+          logonCommand = 'cmd.exe /c C:\\gitora\\wrapper.cmd';
+        }
+      }
+      const wsbPath = path.join(dir, 'session.wsb');
+      await fs.writeFile(wsbPath, commitSessions.buildWsb({
+        hostFolder: dir,
+        logonCommand,
+        memoryMb: options.memoryMb,
+        networking: options.networking,
+        extraFolders,
+      }), { encoding: 'utf8' });
+      let child = null;
+      try {
+        child = spawn(SANDBOX_EXE, [wsbPath], { detached: true, stdio: 'ignore' });
+        child.unref();
+        await new Promise((resolve, reject) => {
+          child.once('error', reject);
+          child.once('spawn', resolve);
+        });
+      } catch {
+        throw new Error('Песочница недоступна: проверьте, что Windows Sandbox включён');
+      }
+      if (!child || !Number.isInteger(child.pid)) {
+        throw new Error('Песочница недоступна: проверьте, что Windows Sandbox включён');
+      }
+      const entry = {
+        ...session,
+        state: 'running',
+        pid: child.pid,
+        dir,
+        wsbPath,
+        expiresAt: Date.now() + options.maxAgeMinutes * 60 * 1000,
+      };
+      child.once('exit', () => {
+        const live = commitSessionRegistry.get(entry.id);
+        if (live) {
+          if (live.expireTimer) clearTimeout(live.expireTimer);
+          live.state = 'gone';
+          void removeSessionDir(live.dir);
+          commitSessionRegistry.delete(live.id);
+          void clearOrphanRecord(live.id);
+        }
+      });
+      commitSessionRegistry.set(entry.id, entry);
+      await recordOrphanSession(entry);
+      entry.expireTimer = setTimeout(() => { void expireSession(entry.id); }, options.maxAgeMinutes * 60 * 1000);
+      if (entry.expireTimer.unref) entry.expireTimer.unref();
+      return publicSession(entry);
+    } catch (error) {
+      await removeSessionDir(dir);
+      // Never leak host paths (temp layout, username) to the renderer.
+      if (error && ['ENOENT', 'ENOSPC', 'EACCES', 'EPERM'].includes(error.code)) {
+        console.error('[sessions] prepare failed:', error.message);
+        throw new Error('Не удалось подготовить сессию');
+      }
+      throw error;
+    }
+  } finally {
+    sessionStarting = false;
+  }
+}));
+
+ipcMain.handle('session:stop', result(async (_event, id) => {
+  const sessionId = typeof id === 'string' ? id : id?.id;
+  const entry = commitSessionRegistry.get(sessionId);
+  if (!entry) throw new Error('Сессия не найдена');
+  if (entry.expireTimer) clearTimeout(entry.expireTimer);
+  entry.state = 'stopping';
+  await killSessionVm(entry);
+  // Confirm death BEFORE unmapping the dir: removing the mapped folder from
+  // under a live VM strands it without a way back.
+  const deadline = Date.now() + 10000;
+  let dead = !commitSessions.isAlive(entry.pid);
+  while (!dead && Date.now() < deadline) {
+    await sleep(500);
+    dead = !commitSessions.isAlive(entry.pid);
+  }
+  if (!dead) {
+    entry.state = 'running';
+    throw new Error('Не удалось остановить VM: закройте окно песочницы вручную');
+  }
+  await removeSessionDir(entry.dir);
+  commitSessionRegistry.delete(entry.id);
+  await clearOrphanRecord(entry.id);
+  return { id: entry.id, state: 'gone' };
+}));
+
+ipcMain.handle('session:list', result(async () => (await liveSessions()).map(publicSession)));
+
+ipcMain.handle('session:log', result(async (_event, id) => {
+  const sessionId = typeof id === 'string' ? id : id?.id;
+  const entry = commitSessionRegistry.get(sessionId);
+  if (!entry) throw new Error('Сессия не найдена');
+  await refreshSessionLiveness(entry);
+  const live = commitSessionRegistry.get(sessionId);
+  if (!live) throw new Error('Сессия завершена');
+  const raw = await commitSessions.readFileTail(path.join(live.dir, 'session.log'));
+  const appRaw = await commitSessions.readFileTail(path.join(live.dir, 'apprun.log'));
+  const log = appRaw
+    ? `${commitSessions.tailText(raw)}\n\n--- app output ---\n${commitSessions.tailText(appRaw)}`
+    : commitSessions.tailText(raw);
+  return { id: live.id, state: live.state, log };
+}));
 
 ipcMain.handle('github:repos', result(async () => (
   githubRequestAll('/user/repos?per_page=100&sort=updated')
@@ -2763,8 +3333,7 @@ ipcMain.handle('app:download-release', result(async (_event, { url, fileName, op
   const filePath = await resolveDownloadPath(fileName, options);
   if (!filePath) return null;
 
-  const buffer = Buffer.from(await response.arrayBuffer());
-  await fs.writeFile(filePath, buffer);
+  await streamResponseToFile(response, filePath, 'Файл превышает лимит 512 МБ');
 
   return filePath;
 }));
@@ -2773,14 +3342,8 @@ ipcMain.handle('app:download-archive', result(async (_event, { owner, repo, sha,
   if (!validRepo(owner, repo)) throw new Error('РќРµРєРѕСЂСЂРµРєС‚РЅРѕРµ РёРјСЏ СЂРµРїРѕР·РёС‚РѕСЂРёСЏ');
   if (!isValidGitSha(sha)) throw new Error('Некорректный SHA коммита');
 
-  const url = gitProvider === 'gitea'
-    ? `${giteaBaseUrl}/${owner}/${repo}/archive/${sha}.zip`
-    : `${GITHUB_ORIGIN}/${owner}/${repo}/archive/${sha}.zip`;
-  const response = await fetch(url, {
-    headers: githubToken
-      ? (gitProvider === 'gitea' ? giteaHeaders(githubToken) : { Authorization: `Bearer ${githubToken}` })
-      : {},
-  });
+  const { url, headers } = commitArchiveRequest(owner, repo, sha);
+  const response = await fetch(url, { headers, signal: AbortSignal.timeout(ARCHIVE_FETCH_TIMEOUT_MS) });
 
   if (!response.ok) throw new Error('РќРµ СѓРґР°Р»РѕСЃСЊ СЃРєР°С‡Р°С‚СЊ Р°СЂС…РёРІ');
 
@@ -2788,8 +3351,7 @@ ipcMain.handle('app:download-archive', result(async (_event, { owner, repo, sha,
   const filePath = await resolveDownloadPath(fileName, options);
   if (!filePath) return null;
 
-  const buffer = Buffer.from(await response.arrayBuffer());
-  await fs.writeFile(filePath, buffer);
+  await streamResponseToFile(response, filePath, 'Архив превышает лимит 512 МБ');
 
   return filePath;
 }));

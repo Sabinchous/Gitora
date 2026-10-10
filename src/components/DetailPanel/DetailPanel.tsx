@@ -10,6 +10,7 @@ import {
   GitBranch,
   GitCommitHorizontal,
   Github,
+  Play,
   RotateCcw,
   X,
 } from 'lucide-react';
@@ -101,6 +102,7 @@ export const DetailPanel: React.FC = () => {
     commitStatsLoading,
     commitWebUrl,
     providerLabel,
+    setLaunchTarget,
   } = useApp();
   const [copiedHash, setCopiedHash] = useState(false);
   const copiedTimer = useRef<number | undefined>(undefined);
@@ -184,6 +186,7 @@ export const DetailPanel: React.FC = () => {
               items={[
                 { id: 'copy-sha', label: 'Копировать SHA', icon: Copy, onSelect: () => void copyHash() },
                 { id: 'download', label: 'Скачать эту версию', icon: Download, onSelect: () => { const [owner, repo] = project.repo.split('/'); void downloadArchive(owner, repo, selectedCommit.id); } },
+                { id: 'run-session', label: 'Запустить эту версию', icon: Play, onSelect: () => { const parts = project.repo.split('/').map(part => part.trim()); if (parts.length !== 2 || !parts[0] || !parts[1]) return; const [owner, repo] = parts; setLaunchTarget({ owner, repo, sha: selectedCommit.id }); } },
                 { id: 'github', label: `Открыть на ${providerLabel}`, icon: Github, onSelect: () => void openExternal(commitWebUrl(project.repo, selectedCommit.id)), external: true },
               ]}
             />

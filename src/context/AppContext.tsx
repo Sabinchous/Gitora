@@ -1,6 +1,7 @@
 import React, {
   createContext,
   ReactNode,
+  useCallback,
   useContext,
   useEffect,
   useRef,
@@ -18,6 +19,7 @@ import {
   Commit,
   CommitDetails,
   CommitResult,
+  CommitSession,
   CreateRepositoryOptions,
   CreateReleaseInput,
   CreateRepositoryResult,
@@ -45,6 +47,9 @@ import {
   Project,
   Release,
   ReleaseAssetSelection,
+  RuntimeDetection,
+  SessionLog,
+  SessionStartInput,
   UploadFolderSummary,
   BranchDirection,
 } from '../types';
@@ -101,6 +106,15 @@ interface AppState {
   teamInvitations: TeamResource<GitHubInvitation>;
   teamContributors: TeamResource<GitHubContributor>;
   teamStats: TeamResource<GitHubContributorStatistics>;
+  sessions: CommitSession[];
+  sessionsLoading: boolean;
+  sessionsMutating: boolean;
+  sessionsError: string | null;
+  sessionLogById: Record<string, SessionLog>;
+  sessionLogLoading: boolean;
+  launchTarget: { owner: string; repo: string; sha: string } | null;
+  detection: RuntimeDetection | null;
+  detecting: boolean;
 }
 
 export interface TeamResource<T> {
@@ -208,6 +222,12 @@ interface AppContextType extends AppState {
   restartMcp: () => Promise<AiConnectionStatus | null>;
   allowMcpWrites: (duration: McpWriteDuration) => Promise<McpWriteStatus | null>;
   revokeMcpWrites: () => Promise<McpWriteStatus | null>;
+  loadSessions: (quiet?: boolean) => Promise<void>;
+  startSession: (input: SessionStartInput) => Promise<boolean>;
+  stopSession: (id: string) => Promise<boolean>;
+  loadSessionLog: (id: string) => Promise<void>;
+  setLaunchTarget: (t: { owner: string; repo: string; sha: string } | null) => void;
+  detectSessionTarget: (owner: string, repo: string, sha: string) => Promise<RuntimeDetection | null>;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -451,6 +471,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [teamInvitations, setTeamInvitations] = useState<TeamResource<GitHubInvitation>>(emptyTeamResource);
   const [teamContributors, setTeamContributors] = useState<TeamResource<GitHubContributor>>(emptyTeamResource);
   const [teamStats, setTeamStats] = useState<TeamResource<GitHubContributorStatistics>>(emptyTeamResource);
+  const [sessions, setSessions] = useState<CommitSession[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [sessionsMutating, setSessionsMutating] = useState(false);
+  const [sessionsError, setSessionsError] = useState<string | null>(null);
+  const [sessionLogById, setSessionLogById] = useState<Record<string, SessionLog>>({});
+  const [sessionLogLoading, setSessionLogLoading] = useState(false);
+  const [launchTarget, setLaunchTarget] = useState<{ owner: string; repo: string; sha: string } | null>(null);
+  const [detection, setDetection] = useState<RuntimeDetection | null>(null);
+  const [detecting, setDetecting] = useState(false);
   projectRef.current = project;
 
   const notify = (text: string) => {
@@ -616,6 +645,138 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       : nextProjects[0] ?? null);
   };
 
+  const sessionsReqId = useRef(0);
+  const sessionLogReqId = useRef<Record<string, number>>({});
+
+  const loadSessions = useCallback(async (quiet = false) => {
+    if (!connected || !window.electronAPI) return;
+    const reqId = ++sessionsReqId.current;
+    if (!quiet) setSessionsLoading(true);
+    setSessionsError(null);
+    try {
+      const result = await window.electronAPI.github.listSessions();
+      if (reqId !== sessionsReqId.current) return;
+      if (result.success && result.data) {
+        setSessions(result.data);
+      } else {
+        setSessionsError(result.error || 'Не удалось загрузить сессии');
+      }
+    } catch (error) {
+      if (reqId !== sessionsReqId.current) return;
+      setSessionsError(error instanceof Error ? error.message : 'Не удалось загрузить сессии');
+    } finally {
+      if (reqId === sessionsReqId.current && !quiet) setSessionsLoading(false);
+    }
+  }, [connected]);
+
+  const startSession = async (input: SessionStartInput): Promise<boolean> => {
+    if (!window.electronAPI) {
+      showError('Сессии доступны в приложении Gitora');
+      return false;
+    }
+    setSessionsMutating(true);
+    setSessionsError(null);
+    try {
+      const result = await window.electronAPI.github.startSession(input);
+      if (!result.success || !result.data?.id) {
+        const message = result.error || 'Не удалось запустить сессию';
+        setSessionsError(message);
+        showError(message);
+        return false;
+      }
+      await loadSessions();
+      notify('Сессия запущена');
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Не удалось запустить сессию';
+      setSessionsError(message);
+      showError(message);
+      return false;
+    } finally {
+      setSessionsMutating(false);
+    }
+  };
+
+  const stopSession = async (id: string): Promise<boolean> => {
+    if (!window.electronAPI) {
+      showError('Сессии доступны в приложении Gitora');
+      return false;
+    }
+    setSessionsMutating(true);
+    setSessionsError(null);
+    try {
+      const result = await window.electronAPI.github.stopSession(id);
+      if (!result.success) {
+        const message = result.error || 'Не удалось остановить сессию';
+        setSessionsError(message);
+        showError(message);
+        return false;
+      }
+      setSessionLogById(prev => Object.fromEntries(
+        Object.entries(prev).filter(([key]) => key !== id),
+      ) as Record<string, SessionLog>);
+      await loadSessions();
+      notify('Сессия остановлена');
+      return true;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Не удалось остановить сессию';
+      setSessionsError(message);
+      showError(message);
+      return false;
+    } finally {
+      setSessionsMutating(false);
+    }
+  };
+
+  const detectSessionTarget = async (owner: string, repo: string, sha: string): Promise<RuntimeDetection | null> => {
+    if (!window.electronAPI) {
+      showError('Сессии доступны в приложении Gitora');
+      return null;
+    }
+    setDetecting(true);
+    try {
+      const result = await window.electronAPI.github.detectSessionTarget({ owner, repo, sha });
+      if (result.success && result.data) {
+        setDetection(result.data);
+        return result.data;
+      }
+      showError(result.error || 'Не удалось определить рантайм');
+      return null;
+    } catch (error) {
+      showError(error instanceof Error ? error.message : 'Не удалось определить рантайм');
+      return null;
+    } finally {
+      setDetecting(false);
+    }
+  };
+
+  const loadSessionLog = async (id: string): Promise<void> => {
+    if (!id || !window.electronAPI) return;
+    if (!id || !window.electronAPI) return;
+    const reqId = (sessionLogReqId.current[id] || 0) + 1;
+    sessionLogReqId.current[id] = reqId;
+    setSessionLogLoading(true);
+    try {
+      const result = await window.electronAPI.github.getSessionLog(id);
+      if (sessionLogReqId.current[id] !== reqId) return;
+      const logData = result.success ? result.data : undefined;
+      if (logData) {
+        setSessionLogById(prev => ({ ...prev, [id]: logData }));
+      } else {
+        const message = result.error || 'Не удалось загрузить лог сессии';
+        setSessionsError(message);
+        showError(message);
+      }
+    } catch (error) {
+      if (sessionLogReqId.current[id] !== reqId) return;
+      const message = error instanceof Error ? error.message : 'Не удалось загрузить лог сессии';
+      setSessionsError(message);
+      showError(message);
+    } finally {
+      if (sessionLogReqId.current[id] === reqId) setSessionLogLoading(false);
+    }
+  };
+
   const login = async (input: LoginInput) => {
     if (!window.electronAPI) {
       showError('Авторизация доступна в приложении Gitora');
@@ -659,6 +820,15 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     teamProfiles.current.clear();
     hydrateTeamCache(createTeamCacheEntry());
     setCommitStatsLoading(false);
+    setSessions([]);
+    setSessionsLoading(false);
+    setSessionsMutating(false);
+    setSessionsError(null);
+    setSessionLogById({});
+    setSessionLogLoading(false);
+    setLaunchTarget(null);
+    setDetection(null);
+    setDetecting(false);
     setGraphLayout(null);
     setLastUpdatedAt(null);
     setConnectionFailure(null);
@@ -1763,6 +1933,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       teamInvitations,
       teamContributors,
       teamStats,
+      sessions,
+      sessionsLoading,
+      sessionsMutating,
+      sessionsError,
+      sessionLogById,
+      sessionLogLoading,
+      launchTarget,
+      loadSessions,
+      startSession,
+      stopSession,
+      loadSessionLog,
+      setLaunchTarget,
+      detection,
+      detecting,
+      detectSessionTarget,
       refreshAiStatus,
       runAiDiagnostics,
       configureAiClient,

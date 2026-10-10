@@ -103,6 +103,61 @@ export interface AccountsSnapshot {
 
 export type SessionUser = AuthenticatedUser & Partial<AccountsSnapshot>;
 
+export type CommitSessionState = 'starting' | 'running' | 'stopping' | 'gone';
+
+export interface CommitSession {
+  id: string;
+  owner: string;
+  repo: string;
+  sha: string;
+  launchFile: string | null;
+  launchCommand?: string;
+  state: CommitSessionState;
+  createdAt: string;
+  expiresAt?: string;
+}
+
+export interface SessionStartInput {
+  owner: string;
+  repo: string;
+  sha: string;
+  runtime?: 'node' | 'dotnet' | 'python';
+  launchFile?: string | null;
+  launchCommand?: string;
+  packageDir?: string;
+  buildFirst?: boolean;
+  memoryMb?: number;
+  networking?: boolean;
+  maxAgeMinutes?: number;
+}
+
+export type RuntimeKind = 'dotnet' | 'node' | 'python' | 'unknown';
+
+export interface RuntimeDetection {
+  kind: RuntimeKind;
+  packagePath?: string;
+  packageDir?: string;
+  scripts?: string[];
+  electron?: boolean;
+  buildFirst?: boolean;
+  command?: string | null;
+  launchFile?: string;
+  entry?: string | null;
+  manifest?: string;
+}
+
+export interface SessionDetectInput {
+  owner: string;
+  repo: string;
+  sha: string;
+}
+
+export interface SessionLog {
+  id: string;
+  state: CommitSessionState;
+  log: string;
+}
+
 export type GitHubCollaboratorPermission = 'pull' | 'triage' | 'push' | 'maintain' | 'admin';
 export type GitHubTeamRole = 'Read' | 'Triage' | 'Write' | 'Maintain' | 'Admin';
 export type TeamLoadState = 'idle' | 'loading' | 'loaded' | 'empty' | 'forbidden' | 'error' | 'pending';
@@ -562,6 +617,11 @@ export interface ElectronAPI {
     getProvider: () => Promise<GitHubApiResult<GitProviderInfo>>;
     switchAccount: (id: string) => Promise<GitHubApiResult<SessionUser>>;
     removeAccount: (id: string) => Promise<GitHubApiResult<SessionUser | null>>;
+    startSession: (input: SessionStartInput) => Promise<GitHubApiResult<CommitSession>>;
+    stopSession: (id: string) => Promise<GitHubApiResult<{ id: string; state: CommitSessionState }>>;
+    listSessions: () => Promise<GitHubApiResult<CommitSession[]>>;
+    getSessionLog: (id: string) => Promise<GitHubApiResult<SessionLog>>;
+    detectSessionTarget: (input: SessionDetectInput) => Promise<GitHubApiResult<RuntimeDetection>>;
     restoreSession: () => Promise<GitHubApiResult<SessionUser | null>>;
     logout: () => Promise<GitHubApiResult<null>>;
     getRepos: () => Promise<GitHubApiResult<GitHubRepo[]>>;

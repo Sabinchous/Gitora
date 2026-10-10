@@ -1,0 +1,632 @@
+// Commit sessions (Phase 1): model + .wsb/provisioning generation.
+// Runs a repo commit inside a disposable Windows Sandbox: the host downloads
+// the commit archive, maps it into the VM, the VM builds and runs the app.
+// Closing the sandbox wipes everything; the host keeps no build garbage.
+//
+// Pure logic (no Electron dependency) so it is unit-testable. Process
+// management and IPC live in electron/main.cjs.
+
+const crypto = require('crypto');
+const path = require('path');
+const fs = require('fs/promises');
+const nodeFs = require('fs');
+
+const SESSION_STATES = ['starting', 'running', 'stopping', 'gone'];
+const RUNNABLE_EXTENSIONS = ['.csproj', '.vbproj', '.fsproj'];
+const BUILDABLE_EXTENSIONS = [...RUNNABLE_EXTENSIONS, '.sln', '.slnx'];
+const LAUNCH_FILE_PATTERN = /^[A-Za-z0-9._\-/ ]+$/;
+// Pinned SDK for the host cache (matches the dev environment).
+// SHA512 from the official release-metadata index
+// (builds.dotnet.microsoft.com/dotnet/release-metadata/10.0/releases.json).
+const PINNED_DOTNET_SDK = '10.0.400';
+const DOTNET_SDK_URL = `https://builds.dotnet.microsoft.com/dotnet/Sdk/${PINNED_DOTNET_SDK}/dotnet-sdk-${PINNED_DOTNET_SDK}-win-x64.zip`;
+const DOTNET_SDK_SHA512 = '9b8b88590e4da131bfd0da7aa089d0fc04d5418d5f8607ec13d55dc5a17b4399afd54d496c12657fa05c6c6546dc5eab930f26ac6c50f2d3a7712c0fb378c366';
+// Pinned portable Node for the node runtime (LTS Jod, verified).
+// SHA256 from https://nodejs.org/dist/v22.23.2/SHASUMS256.txt.
+const PINNED_NODE = '22.23.2';
+const NODE_URL = `https://nodejs.org/dist/v${PINNED_NODE}/node-v${PINNED_NODE}-win-x64.zip`;
+const NODE_SHA256 = '1177b4137ba5adaa56354ae40f1080c7450e8ae09cecb47da459d1c52ac99f97';
+// Pinned CPython for the python runtime (official installer, silent mode).
+// SHA256 verified 2026-09-09 by downloading python.org/ftp artifact.
+const PINNED_PYTHON = '3.13.15';
+const PYTHON_URL = `https://www.python.org/ftp/python/${PINNED_PYTHON}/python-${PINNED_PYTHON}-amd64.exe`;
+const PYTHON_SHA256 = 'edec09c4853aeae9ac36efb8c9f95b6b8e2fee65eee56d9767a8b7c69c574403';
+const PYTHON_ENTRY_CANDIDATES = ['app.py', 'main.py', 'manage.py', 'run.py', 'wsgi.py', '__main__.py'];
+const PYTHON_MANIFESTS = ['requirements.txt', 'pyproject.toml', 'setup.py', 'setup.cfg', 'Pipfile'];
+const DEFAULT_MAX_AGE_MINUTES = 240;
+const DEFAULT_MEMORY_MB = 4096;
+
+function isRunnableLaunchFile(file) {
+  return RUNNABLE_EXTENSIONS.some(ext => String(file || '').toLowerCase().endsWith(ext));
+}
+
+// Validates a user-provided launch file path (repo-relative). Rejects
+// absolute paths, traversal and non-buildable extensions.
+function validateLaunchFile(value) {
+  const raw = typeof value === 'string' ? value.trim().replace(/\\/g, '/') : '';
+  if (!raw) throw new Error('Укажите файл запуска (например, src/App/App.csproj)');
+  if (/^[a-zA-Z]:\//.test(raw) || raw.startsWith('/') || raw.includes('..')) {
+    throw new Error('Файл запуска должен быть относительным путём внутри репозитория');
+  }
+  if (!LAUNCH_FILE_PATTERN.test(raw)) throw new Error('Недопустимые символы в пути файла запуска');
+  const lower = raw.toLowerCase();
+  if (!BUILDABLE_EXTENSIONS.some(ext => lower.endsWith(ext))) {
+    throw new Error('Файл запуска: .csproj/.vbproj/.fsproj (запуск) или .sln/.slnx (только сборка)');
+  }
+  return raw;
+}
+
+// Picks a default launch file from a repo file listing: runnable projects
+// first (shallowest), then solutions. Returns null when nothing fits.
+function detectLaunchFile(files) {
+  const list = Array.isArray(files) ? files.filter(name => typeof name === 'string') : [];
+  const depth = (name) => name.split('/').length;
+  const runnable = list
+    .filter(name => RUNNABLE_EXTENSIONS.some(ext => name.toLowerCase().endsWith(ext)))
+    .sort((a, b) => depth(a) - depth(b) || a.localeCompare(b));
+  if (runnable[0]) return runnable[0];
+  const solutions = list
+    .filter(name => ['.sln', '.slnx'].some(ext => name.toLowerCase().endsWith(ext)))
+    .sort((a, b) => depth(a) - depth(b) || a.localeCompare(b));
+  return solutions[0] || null;
+}
+
+// --- Runtime auto-detection ------------------------------------------------
+// Detects how to build & run a commit: dotnet (.csproj/.sln), node
+// (package.json) or python (requirements/pyproject + entry script).
+// Returns { kind, ... } where kind is one of
+// 'dotnet' | 'node' | 'python' | 'unknown'.
+
+function parsePackageJson(text) {
+  try {
+    // Strip a leading BOM: editors love prepending it to package.json.
+    const pkg = JSON.parse(String(text || '').replace(/^﻿/, ''));
+    if (!pkg || typeof pkg !== 'object' || Array.isArray(pkg)) return null;
+    const scripts = {};
+    if (pkg.scripts && typeof pkg.scripts === 'object') {
+      for (const [key, value] of Object.entries(pkg.scripts)) {
+        if (typeof value === 'string' && value) scripts[key] = value;
+      }
+    }
+    const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+    return {
+      name: typeof pkg.name === 'string' ? pkg.name : '',
+      main: typeof pkg.main === 'string' ? pkg.main : '',
+      scripts,
+      electron: Object.prototype.hasOwnProperty.call(deps, 'electron'),
+    };
+  } catch {
+    return null;
+  }
+}
+
+// Infers node vs python for a bare launch command (UI always sends an
+// explicit runtime; this is the back-compat path).
+function inferRuntime(command) {
+  return /^python(\d(\.\d+)?)?(\.exe)?\s|^py\s/i.test(String(command || '')) ? 'python' : 'node';
+}
+
+// Single launch command executed inside the disposable VM. The VM is wiped
+// afterwards, but keep it to one command: no chaining, redirection or
+// substitution.
+function sanitizeLaunchCommand(value) {
+  const cmd = String(value == null ? '' : value).trim();
+  if (!cmd) throw new Error('Укажите команду запуска');
+  if (cmd.length > 500) throw new Error('Команда запуска слишком длинная (макс. 500)');
+  if (/[\r\n&|><^%!`"]/.test(cmd)) throw new Error('Команда запуска: одна команда без кавычек, & | > < и подстановок');
+  return cmd;
+}
+
+function stripTopFolder(name) {
+  const parts = String(name || '').split('/');
+  return parts.length > 1 ? parts.slice(1).join('/') : String(name || '');
+}
+
+function detectRuntime(files, packageJsonText) {
+  const list = (Array.isArray(files) ? files : [])
+    .filter(name => typeof name === 'string' && !name.endsWith('/'))
+    .map(name => name.replace(/\\/g, '/'))
+    .map(stripTopFolder)
+    .filter(name => name && !name.startsWith('.git/'));
+  const pkgPaths = list
+    .filter(name => name === 'package.json' || name.endsWith('/package.json'))
+    .sort((a, b) => a.split('/').length - b.split('/').length || a.localeCompare(b));
+  if (pkgPaths[0]) {
+    const parsed = parsePackageJson(packageJsonText);
+    const scripts = (parsed && parsed.scripts) || {};
+    const electron = !!(parsed && parsed.electron);
+    let command = null;
+    if (scripts.start) command = 'npm start';
+    else if (electron) command = 'npx electron .';
+    else if (scripts.dev) command = 'npm run dev';
+    return {
+      kind: 'node',
+      packagePath: pkgPaths[0],
+      packageDir: pkgPaths[0].includes('/') ? pkgPaths[0].slice(0, pkgPaths[0].lastIndexOf('/')) : '',
+      scripts: Object.keys(scripts),
+      electron,
+      buildFirst: Boolean(scripts.build),
+      command,
+    };
+  }
+  const file = detectLaunchFile(list);
+  if (file) return { kind: 'dotnet', launchFile: file };
+  const manifestPaths = list
+    .filter(name => PYTHON_MANIFESTS.some(base => name === base || name.endsWith(`/${base}`)))
+    .sort((a, b) => a.split('/').length - b.split('/').length || a.localeCompare(b));
+  if (manifestPaths[0]) {
+    const dir = manifestPaths[0].includes('/') ? manifestPaths[0].slice(0, manifestPaths[0].lastIndexOf('/')) : '';
+    const prefix = dir ? `${dir}/` : '';
+    const depth = (name) => name.split('/').length;
+    let entry = null;
+    for (const base of PYTHON_ENTRY_CANDIDATES) {
+      const hits = list
+        .filter(name => (dir ? name.startsWith(prefix) : true) && (name === `${prefix}${base}` || name.endsWith(`/${base}`)))
+        .sort((a, b) => depth(a) - depth(b) || a.localeCompare(b));
+      if (hits[0]) {
+        entry = dir ? hits[0].slice(prefix.length) : hits[0];
+        break;
+      }
+    }
+    return {
+      kind: 'python',
+      packageDir: dir,
+      manifest: manifestPaths[0].split('/').pop(),
+      entry,
+      command: entry ? `python ${entry}` : null,
+    };
+  }
+  return { kind: 'unknown' };
+}
+
+function escapeXml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function buildWsb({ hostFolder, sandboxFolder = 'C:\\gitora', logonCommand, memoryMb = DEFAULT_MEMORY_MB, networking = true, extraFolders = [] }) {
+  if (!hostFolder || !path.isAbsolute(hostFolder)) throw new Error('Некорректная папка сессии');
+  if (!logonCommand) throw new Error('Пустая команда запуска VM');
+  const memory = memoryMb === undefined ? DEFAULT_MEMORY_MB : Number(memoryMb);
+  if (!Number.isInteger(memory) || memory < 1024 || memory > 32768) {
+    throw new Error('Некорректный лимит памяти VM (1024–32768 МБ)');
+  }
+  const folders = [{ hostFolder, sandboxFolder, readOnly: false }];
+  for (const extra of extraFolders) {
+    if (!extra || !extra.hostFolder || !path.isAbsolute(extra.hostFolder) || !extra.sandboxFolder) {
+      throw new Error('Некорректная дополнительная папка VM');
+    }
+    folders.push({ hostFolder: extra.hostFolder, sandboxFolder: extra.sandboxFolder, readOnly: extra.readOnly !== false });
+  }
+  const mapped = folders.map(folder => `    <MappedFolder>\r\n`
+    + `      <HostFolder>${escapeXml(folder.hostFolder)}</HostFolder>\r\n`
+    + `      <SandboxFolder>${escapeXml(folder.sandboxFolder)}</SandboxFolder>\r\n`
+    + `      <ReadOnly>${folder.readOnly ? 'true' : 'false'}</ReadOnly>\r\n`
+    + `    </MappedFolder>\r\n`).join('');
+  return `<Configuration>\r\n`
+    + `  <MemoryInMB>${memory}</MemoryInMB>\r\n`
+    + `  <Networking>${networking === false ? 'Disable' : 'Enable'}</Networking>\r\n`
+    + `  <MappedFolders>\r\n`
+    + mapped
+    + `  </MappedFolders>\r\n`
+    + `  <LogonCommand>\r\n`
+    + `    <Command>${escapeXml(logonCommand)}</Command>\r\n`
+    + `  </LogonCommand>\r\n`
+    + `</Configuration>\r\n`;
+}
+
+// Wrapper run as LogonCommand when a host SDK cache is mapped read-only:
+// pre-seeds the environment so provision skips the SDK download.
+function buildSdkWrapper() {
+  return '@echo off\r\n'
+    + 'set "DOTNET_ROOT=C:\\sdkcache"\r\n'
+    + 'set "PATH=C:\\sdkcache;%PATH%"\r\n'
+    + 'set DOTNET_CLI_TELEMETRY_OPTOUT=1\r\n'
+    + 'set DOTNET_NOLOGO=1\r\n'
+    + 'call C:\\gitora\\provision.cmd\r\n';
+}
+
+// Full session input validation + defaults. Pure and unit-tested; main.cjs
+// trusts only its output.
+function normalizeSessionInput(input) {
+  const data = input && typeof input === 'object' ? input : {};
+  const owner = typeof data.owner === 'string' ? data.owner : '';
+  const repo = typeof data.repo === 'string' ? data.repo : '';
+  const sha = typeof data.sha === 'string' ? data.sha : '';
+  if (!/^[A-Za-z0-9_.-]+$/.test(owner) || owner === '.' || owner === '..') {
+    throw new Error('Некорректное имя владельца репозитория');
+  }
+  if (!/^[A-Za-z0-9_.-]+$/.test(repo) || repo === '.' || repo === '..') {
+    throw new Error('Некорректное имя репозитория');
+  }
+  if (!/^[0-9a-f]{40}$/i.test(sha)) throw new Error('Некорректный SHA коммита');
+  let launchFile = null;
+  let launchCommand = null;
+  let packageDir = '';
+  let buildFirst = false;
+  const explicitRuntime = data.runtime === 'node' || data.runtime === 'dotnet' || data.runtime === 'python'
+    ? data.runtime
+    : null;
+  if (data.runtime !== undefined && explicitRuntime === null) {
+    throw new Error('Некорректный рантайм');
+  }
+  const runtime = explicitRuntime
+    || (data.launchCommand !== undefined ? inferRuntime(data.launchCommand) : 'dotnet');
+  if (runtime === 'node' || runtime === 'python') {
+    launchCommand = sanitizeLaunchCommand(data.launchCommand);
+    packageDir = String(data.packageDir == null ? '' : data.packageDir).replace(/\\/g, '/').replace(/(^\/+|\/+$)/g, '');
+    if (packageDir && (packageDir.includes('..') || !LAUNCH_FILE_PATTERN.test(packageDir))) {
+      throw new Error('Некорректная папка пакета');
+    }
+    buildFirst = data.buildFirst === true;
+  } else {
+    launchFile = validateLaunchFile(data.launchFile);
+  }
+  if (data.memoryMb !== undefined && typeof data.memoryMb !== 'number') {
+    throw new Error('Некорректный лимит памяти VM (1024–32768 МБ)');
+  }
+  const memoryMb = data.memoryMb === undefined ? DEFAULT_MEMORY_MB : data.memoryMb;
+  if (!Number.isInteger(memoryMb) || memoryMb < 1024 || memoryMb > 32768) {
+    throw new Error('Некорректный лимит памяти VM (1024–32768 МБ)');
+  }
+  if (data.maxAgeMinutes !== undefined && typeof data.maxAgeMinutes !== 'number') {
+    throw new Error('Некорректный лимит времени сессии (5–1440 минут)');
+  }
+  const maxAgeMinutes = data.maxAgeMinutes === undefined ? DEFAULT_MAX_AGE_MINUTES : data.maxAgeMinutes;
+  if (!Number.isInteger(maxAgeMinutes) || maxAgeMinutes < 5 || maxAgeMinutes > 1440) {
+    throw new Error('Некорректный лимит времени сессии (5–1440 минут)');
+  }
+  return { owner, repo, sha, runtime, launchFile, launchCommand, packageDir, buildFirst, memoryMb, networking: data.networking === undefined ? true : data.networking === true, maxAgeMinutes };
+}
+
+function sdkCacheDir(userDataDir) {
+  return path.join(userDataDir, 'gitora-sdkcache');
+}
+
+// Node cache layout (all under one host dir):
+//   node/         - portable Node (pinned version dir) or empty
+//   writable/     - npm-cache/ + electron-cache/ (npm/electron write here)
+function nodeCacheDir(userDataDir) {
+  return path.join(userDataDir, 'gitora-nodecache');
+}
+
+function nodeCacheWritableDir(userDataDir) {
+  return path.join(nodeCacheDir(userDataDir), 'writable');
+}
+
+// Wrapper run as LogonCommand for node sessions: points npm/electron caches
+// at the mapped writable dir, pre-seeds PATH, then runs provision.
+// NOTE: the electron npm package reads `electron_config_cache`
+// (NOT `ELECTRON_CACHE`) for its binary cache.
+function buildNodeWrapper() {
+  return '@echo off\r\n'
+    + 'set "NPM_CONFIG_CACHE=C:\\nodecache\\writable\\npm-cache"\r\n'
+    + 'set "electron_config_cache=C:\\nodecache\\writable\\electron-cache"\r\n'
+    + 'set "PATH=C:\\nodecache\\node;%PATH%"\r\n'
+    + 'set DOTNET_CLI_TELEMETRY_OPTOUT=1\r\n'
+    + 'set DOTNET_NOLOGO=1\r\n'
+    + 'call C:\\gitora\\provision.cmd\r\n';
+}
+
+// Parses `dotnet --list-sdks` output; true when a 10.x SDK is present
+// (stable or preview).
+function hasDotnet10(listSdksOutput) {
+  return String(listSdksOutput || '').split('\n').some(line => /^\s*10\.\d+\.\d+(?:-[^\s[]+)?\s+\[/.test(line));
+}
+
+// True for `node --version` output of a usable runtime (major >= 20).
+function nodeMajorOk(version) {
+  const match = /^v(\d+)\./.exec(String(version || '').trim());
+  return match ? Number(match[1]) >= 20 : false;
+}
+
+// Scoped cleanup of node cache artifacts: node tree, zip, marker — never the
+// writable npm/electron caches living next to them.
+async function removeNodeArtifacts(cache) {
+  try {
+    await fs.rm(path.join(cache, 'node'), { recursive: true, force: true });
+    await fs.rm(path.join(cache, 'node.zip'), { force: true });
+    await fs.rm(path.join(cache, '.node-version'), { force: true });
+  } catch {}
+}
+
+// Tail helper for session:log (host reads the mapped session.log).
+function tailText(text, maxBytes = 65536) {
+  const value = String(text || '');
+  if (Buffer.byteLength(value, 'utf8') <= maxBytes) return value;
+  const buf = Buffer.from(value, 'utf8');
+  let start = buf.length - maxBytes;
+  while (start < buf.length && (buf[start] & 0xc0) === 0x80) start += 1;
+  return '…\n' + buf.slice(start).toString('utf8');
+}
+
+// Reads only the tail of a (potentially huge, guest-written) file.
+async function readFileTail(filePath, maxBytes = 70000) {
+  let handle = null;
+  try {
+    handle = await fs.open(filePath, 'r');
+    const { size } = await handle.stat();
+    const take = Math.min(size, maxBytes);
+    const buf = Buffer.alloc(take);
+    await handle.read(buf, 0, take, size - take);
+    return buf.toString('utf8');
+  } catch {
+    return '';
+  } finally {
+    try {
+      if (handle) await handle.close();
+    } catch {}
+  }
+}
+
+async function sha512OfFile(filePath) {
+  const hash = crypto.createHash('sha512');
+  const stream = nodeFs.createReadStream(filePath);
+  try {
+    for await (const chunk of stream) hash.update(chunk);
+  } finally {
+    stream.destroy();
+  }
+  return hash.digest('hex');
+}
+
+async function verifyFileSha512(filePath, expectedHex) {
+  const actual = await sha512OfFile(filePath);
+  return actual.toLowerCase() === String(expectedHex || '').toLowerCase();
+}
+
+async function sha256OfFile(filePath) {
+  const hash = crypto.createHash('sha256');
+  const stream = nodeFs.createReadStream(filePath);
+  try {
+    for await (const chunk of stream) hash.update(chunk);
+  } finally {
+    stream.destroy();
+  }
+  return hash.digest('hex');
+}
+
+async function verifyFileSha256(filePath, expectedHex) {
+  const expected = String(expectedHex || '').toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(expected)) return false;
+  const actual = await sha256OfFile(filePath);
+  return actual.toLowerCase() === expected;
+}
+
+// Provisioning script run once at VM logon. Two profiles:
+// - dotnet (launchFile): installs .NET SDK when missing (no winget in
+//   Sandbox images), builds the launch file, runs it. Solutions (.sln/.slnx)
+//   are build-only; runnable projects are built AND run.
+// - node (launchCommand): installs portable Node when missing, `npm install`
+//   (+ `npm run build` when buildFirst), then starts the command detached.
+// Shared: unpack the commit archive and resolve %SRCDIR% (single top folder).
+function expandArchiveBlock() {
+  return `powershell -NoProfile -Command "Expand-Archive -LiteralPath 'C:\\gitora\\repo.zip' -DestinationPath 'C:\\gitora\\work' -Force" >> C:\\gitora\\session.log 2>&1\r\n`
+    + `powershell -NoProfile -Command "$d=@(Get-ChildItem 'C:\\gitora\\work' -Directory); if ($d.Count -ne 1) { exit 1 }; $d[0].FullName | Out-File 'C:\\gitora\\srcdir.txt' -Encoding ascii" >> C:\\gitora\\session.log 2>&1\r\n`
+    + 'if %ERRORLEVEL% NEQ 0 (\r\n'
+    + '  echo [%TIME%] bad archive layout, expected one top folder >> C:\\gitora\\session.log\r\n'
+    + '  exit /b 1\r\n'
+    + ')\r\n'
+    + 'for /f "delims=" %%D in (C:\\gitora\\srcdir.txt) do set SRCDIR=%%D\r\n'
+    + 'if not defined SRCDIR exit /b 1\r\n';
+}
+
+function buildProvisionScript({ runtime, launchFile, launchCommand, packageDir = '', buildFirst = false, dotnetChannel = '10.0' }) {
+  const profile = runtime === 'python' || runtime === 'node' || runtime === 'dotnet'
+    ? runtime
+    : (launchCommand !== undefined ? inferRuntime(launchCommand) : 'dotnet');
+  if (profile === 'python') {
+    const command = sanitizeLaunchCommand(launchCommand);
+    const pkgSub = String(packageDir || '').replace(/\\/g, '/').replace(/(^\/+|\/+$)/g, '');
+    if (pkgSub && (pkgSub.includes('..') || !LAUNCH_FILE_PATTERN.test(pkgSub))) {
+      throw new Error('Некорректная папка пакета');
+    }
+    const pkgWin = pkgSub ? `%SRCDIR%\\${pkgSub.replace(/\//g, '\\')}` : '%SRCDIR%';
+    const [pyMajor, pyMinor] = String(PINNED_PYTHON).split('.');
+    const pyHome = `%LOCALAPPDATA%\\Programs\\Python\\Python${pyMajor}${pyMinor}`;
+    return '@echo off\r\n'
+      + 'echo [%TIME%] logon start >> C:\\gitora\\session.log\r\n'
+      + 'set PYTHONUNBUFFERED=1\r\n'
+      + 'python --version >> C:\\gitora\\session.log 2>&1\r\n'
+      + 'if not errorlevel 1 goto :have_python\r\n'
+      + 'echo [%TIME%] installing Python >> C:\\gitora\\session.log\r\n'
+      + `powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest ${PYTHON_URL} -OutFile C:\\gitora\\python-installer.exe" >> C:\\gitora\\session.log 2>&1\r\n`
+      + `certutil -hashfile C:\\gitora\\python-installer.exe SHA256 | findstr /C:"${PYTHON_SHA256}" >nul\r\n`
+      + 'if %ERRORLEVEL% NEQ 0 (\r\n'
+      + '  echo [%TIME%] python installer hash mismatch >> C:\\gitora\\session.log\r\n'
+      + '  exit /b 1\r\n'
+      + ')\r\n'
+      + 'C:\\gitora\\python-installer.exe /quiet InstallAllUsers=0 PrependPath=1 Include_test=0 >> C:\\gitora\\session.log 2>&1\r\n'
+      + `set "PATH=${pyHome};${pyHome}\\Scripts;%PATH%"\r\n`
+      + ':have_python\r\n'
+      + 'python --version >> C:\\gitora\\session.log 2>&1\r\n'
+      + expandArchiveBlock()
+      + `echo "[%TIME%] pip install ${pkgSub || '.'}" >> C:\\gitora\\session.log\r\n`
+      + `cd /d "${pkgWin}"\r\n`
+      + 'if exist requirements.txt (\r\n'
+      + '  call python -m pip install -r requirements.txt >> C:\\gitora\\session.log 2>&1\r\n'
+      + ') else if exist pyproject.toml (\r\n'
+      + '  call python -m pip install . >> C:\\gitora\\session.log 2>&1\r\n'
+      + ') else if exist setup.py (\r\n'
+      + '  call python -m pip install . >> C:\\gitora\\session.log 2>&1\r\n'
+      + ') else if exist setup.cfg (\r\n'
+      + '  call python -m pip install . >> C:\\gitora\\session.log 2>&1\r\n'
+      + ') else if exist Pipfile (\r\n'
+      + '  echo [%TIME%] Pipfile found: install dependencies manually >> C:\\gitora\\session.log\r\n'
+      + ')\r\n'
+      + 'if %ERRORLEVEL% NEQ 0 (\r\n'
+      + '  echo [%TIME%] pip install failed >> C:\\gitora\\session.log\r\n'
+      + '  exit /b 1\r\n'
+      + ')\r\n'
+      + `echo "[%TIME%] pip install ${pkgSub || '.'}" >> C:\\gitora\\session.log\r\n`
+      + `cd /d "${pkgWin}"\r\n`
+      + 'if exist requirements.txt (\r\n'
+      + '  call python -m pip install -r requirements.txt >> C:\\gitora\\session.log 2>&1\r\n'
+      + ')\r\n'
+      + 'if %ERRORLEVEL% NEQ 0 (\r\n'
+      + '  echo [%TIME%] pip install failed >> C:\\gitora\\session.log\r\n'
+      + '  exit /b 1\r\n'
+      + ')\r\n'
+      + `echo "[%TIME%] starting ${command}" >> C:\\gitora\\session.log\r\n`
+      + `start "gitora-app" /D "${pkgWin}" cmd /c "${command} > C:\\gitora\\apprun.log 2>&1"\r\n`
+      + 'echo [%TIME%] exit %ERRORLEVEL% >> C:\\gitora\\session.log\r\n';
+  }
+  if (launchCommand !== undefined) {
+    const command = sanitizeLaunchCommand(launchCommand);
+    const pkgSub = String(packageDir || '').replace(/\\/g, '/').replace(/(^\/+|\/+$)/g, '');
+    if (pkgSub && (pkgSub.includes('..') || !LAUNCH_FILE_PATTERN.test(pkgSub))) {
+      throw new Error('Некорректная папка пакета');
+    }
+    const pkgWin = pkgSub ? `%SRCDIR%\\${pkgSub.replace(/\//g, '\\')}` : '%SRCDIR%';
+    return '@echo off\r\n'
+      + 'echo [%TIME%] logon start >> C:\\gitora\\session.log\r\n'
+      + 'where node >> C:\\gitora\\session.log 2>&1\r\n'
+      + 'if not errorlevel 1 goto :have_node\r\n'
+      + 'echo [%TIME%] installing Node >> C:\\gitora\\session.log\r\n'
+      + `powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest ${NODE_URL} -OutFile C:\\gitora\\node.zip" >> C:\\gitora\\session.log 2>&1\r\n`
+      + `certutil -hashfile C:\\gitora\\node.zip SHA256 | findstr /C:"${NODE_SHA256}" >nul\r\n`
+      + 'if %ERRORLEVEL% NEQ 0 (\r\n'
+      + '  echo [%TIME%] node archive hash mismatch >> C:\\gitora\\session.log\r\n'
+      + '  exit /b 1\r\n'
+      + ')\r\n'
+      + `powershell -NoProfile -Command "Expand-Archive -LiteralPath 'C:\\gitora\\node.zip' -DestinationPath 'C:\\gitora\\node' -Force" >> C:\\gitora\\session.log 2>&1\r\n`
+      + `set "PATH=C:\\gitora\\node\\node-v${PINNED_NODE}-win-x64;%PATH%"\r\n`
+      + ':have_node\r\n'
+      + 'node --version >> C:\\gitora\\session.log 2>&1\r\n'
+      + 'call npm --version >> C:\\gitora\\session.log 2>&1\r\n'
+      + expandArchiveBlock()
+      + 'echo [%TIME%] installing VC++ runtime >> C:\\gitora\\session.log\r\n'
+      + 'powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest https://aka.ms/vs/17/release/vc_redist.x64.exe -OutFile C:\\gitora\\vc_redist.x64.exe" >> C:\\gitora\\session.log 2>&1\r\n'
+      + 'C:\\gitora\\vc_redist.x64.exe /install /quiet /norestart >> C:\\gitora\\session.log 2>&1\r\n'
+      + `echo "[%TIME%] npm install ${pkgSub || '.'}" >> C:\\gitora\\session.log\r\n`
+      + `cd /d "${pkgWin}"\r\n`
+      + 'if exist package-lock.json (\r\n'
+      + '  call npm ci --no-audit --no-fund >> C:\\gitora\\session.log 2>&1\r\n'
+      + ') else (\r\n'
+      + '  call npm install --no-audit --no-fund >> C:\\gitora\\session.log 2>&1\r\n'
+      + ')\r\n'
+      + 'if %ERRORLEVEL% NEQ 0 (\r\n'
+      + '  echo [%TIME%] npm install failed >> C:\\gitora\\session.log\r\n'
+      + '  exit /b 1\r\n'
+      + ')\r\n'
+      + (buildFirst
+        ? 'echo [%TIME%] npm run build >> C:\\gitora\\session.log\r\n'
+          + 'call npm run build >> C:\\gitora\\session.log 2>&1\r\n'
+          + 'if %ERRORLEVEL% NEQ 0 (\r\n'
+          + '  echo [%TIME%] npm run build failed >> C:\\gitora\\session.log\r\n'
+          + '  exit /b 1\r\n'
+          + ')\r\n'
+        : '')
+      + `echo "[%TIME%] starting ${command}" >> C:\\gitora\\session.log\r\n`
+      // No nested quotes: batch has no \" escape, so launch via /D working
+      // dir and redirect inside the child. sanitizeLaunchCommand bans `"`.
+      + `start "gitora-app" /D "${pkgWin}" cmd /c "${command} > C:\\gitora\\apprun.log 2>&1"\r\n`
+      + 'echo [%TIME%] exit %ERRORLEVEL% >> C:\\gitora\\session.log\r\n';
+  }
+  const file = validateLaunchFile(launchFile);
+  if (!/^[0-9]+\.[0-9]+$/.test(String(dotnetChannel || ''))) throw new Error('Некорректный канал .NET SDK');
+  const run = isRunnableLaunchFile(file);
+  const winFile = file.replace(/\//g, '\\');
+  // NOTE: no `set` inside (...) blocks: %PATH% on real machines contains
+  // parentheses (e.g. `Program Files (x86)`) which would break block parsing.
+  return '@echo off\r\n'
+    + 'echo [%TIME%] logon start >> C:\\gitora\\session.log\r\n'
+    + 'where dotnet >> C:\\gitora\\session.log 2>&1\r\n'
+    + 'if not errorlevel 1 goto :have_dotnet\r\n'
+    + 'echo [%TIME%] installing SDK >> C:\\gitora\\session.log\r\n'
+    + `powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; Invoke-WebRequest https://dot.net/v1/dotnet-install.ps1 -OutFile C:\\gitora\\dotnet-install.ps1" >> C:\\gitora\\session.log 2>&1\r\n`
+    + `powershell -NoProfile -ExecutionPolicy Bypass -File C:\\gitora\\dotnet-install.ps1 -Channel ${dotnetChannel} -InstallDir C:\\gitora\\dotnet >> C:\\gitora\\session.log 2>&1\r\n`
+    + 'set "PATH=%PATH%;C:\\gitora\\dotnet"\r\n'
+    + ':have_dotnet\r\n'
+    + 'dotnet --version >> C:\\gitora\\session.log 2>&1\r\n'
+    + expandArchiveBlock()
+    + `echo "[%TIME%] build start ${file}" >> C:\\gitora\\session.log\r\n`
+    + (run
+      ? `dotnet run --project "%SRCDIR%\\${winFile}" -c Release >> C:\\gitora\\session.log 2>&1\r\n`
+      : `dotnet build "%SRCDIR%\\${winFile}" -c Release >> C:\\gitora\\session.log 2>&1\r\n`)
+    + 'echo [%TIME%] exit %ERRORLEVEL% >> C:\\gitora\\session.log\r\n';
+}
+
+function sessionsRoot(baseTempDir) {
+  return path.join(baseTempDir, 'gitora-sessions');
+}
+
+function sessionDir(root, id) {
+  if (!/^[A-Za-z0-9-]+$/.test(String(id || ''))) throw new Error('Некорректный id сессии');
+  return path.join(root, String(id));
+}
+
+function newSession({ owner, repo, sha, launchFile, launchCommand }) {
+  const hasCommand = launchCommand !== undefined && launchCommand !== null;
+  return {
+    id: crypto.randomUUID(),
+    owner,
+    repo,
+    sha,
+    launchFile: hasCommand ? null : validateLaunchFile(launchFile),
+    launchCommand: hasCommand ? sanitizeLaunchCommand(launchCommand) : null,
+    state: 'starting',
+    createdAt: new Date().toISOString(),
+  };
+}
+
+// PID liveness without dependencies.
+function isAlive(pid) {
+  const id = Number(pid);
+  if (!Number.isInteger(id) || id <= 0) return false;
+  try {
+    process.kill(id, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+module.exports = {
+  BUILDABLE_EXTENSIONS,
+  DEFAULT_MAX_AGE_MINUTES,
+  DEFAULT_MEMORY_MB,
+  DOTNET_SDK_SHA512,
+  DOTNET_SDK_URL,
+  NODE_SHA256,
+  NODE_URL,
+  PINNED_DOTNET_SDK,
+  PINNED_NODE,
+  PINNED_PYTHON,
+  PYTHON_SHA256,
+  PYTHON_URL,
+  RUNNABLE_EXTENSIONS,
+  SESSION_STATES,
+  buildProvisionScript,
+  buildNodeWrapper,
+  buildSdkWrapper,
+  buildWsb,
+  detectLaunchFile,
+  detectRuntime,
+  escapeXml,
+  hasDotnet10,
+  inferRuntime,
+  isAlive,
+  isRunnableLaunchFile,
+  newSession,
+  nodeCacheDir,
+  nodeCacheWritableDir,
+  nodeMajorOk,
+  normalizeSessionInput,
+  parsePackageJson,
+  readFileTail,
+  removeNodeArtifacts,
+  sanitizeLaunchCommand,
+  sdkCacheDir,
+  sessionDir,
+  sessionsRoot,
+  sha256OfFile,
+  sha512OfFile,
+  tailText,
+  validateLaunchFile,
+  verifyFileSha256,
+  verifyFileSha512,
+};
